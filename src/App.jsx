@@ -20,6 +20,7 @@ import {
   DollarSign,
   Edit3,
   Heart,
+  Info,
   Image as ImageIcon,
   FileImage,
   ImagePlus,
@@ -27,8 +28,8 @@ import {
   Loader2,
   Moon,
   Music2,
+  Pencil,
   Plus,
-  RotateCcw,
   Save,
   ScanBarcode,
   Search,
@@ -630,6 +631,27 @@ async function resolveAppleMusicAlbumUrl(record) {
   }
 }
 
+async function resolveLinkedStreamingUrls(sourceUrl = "") {
+  if (!sourceUrl) return {};
+
+  try {
+    const params = new URLSearchParams({ url: sourceUrl });
+    const response = await fetchWithTimeout(
+      `https://api.song.link/v1-alpha.1/links?${params.toString()}`,
+      {},
+      6000,
+    );
+    if (!response.ok) return {};
+    const data = await response.json();
+    return {
+      spotifyUrl: data.linksByPlatform?.spotify?.url || "",
+      appleMusicUrl: data.linksByPlatform?.appleMusic?.url || "",
+    };
+  } catch {
+    return {};
+  }
+}
+
 function normalizeComparable(value = "") {
   return String(value)
     .toLowerCase()
@@ -665,11 +687,10 @@ function downloadCollectionCsv(collection) {
     "label",
     "length",
     "cost",
-    "acquired_from",
+    "source",
     "country",
     "status",
     "favorite",
-    "wants_better_artwork",
     "spotify",
     "apple_music",
     "musicbrainz",
@@ -688,7 +709,6 @@ function downloadCollectionCsv(collection) {
     record.country,
     record.releaseStatus,
     record.favorite ? "yes" : "no",
-    record.wantsBetterArtwork ? "yes" : "no",
     spotifyAlbumUrl(record),
     appleMusicAlbumUrl(record),
     record.mbid ? `https://musicbrainz.org/release/${record.mbid}` : "",
@@ -806,6 +826,14 @@ async function fetchReleaseDetails(mbid) {
       ...detailRecord,
       ...detailPatch,
     });
+  }
+  if (!detailPatch.spotifyUrl && detailPatch.appleMusicUrl) {
+    const linked = await resolveLinkedStreamingUrls(detailPatch.appleMusicUrl);
+    if (linked.spotifyUrl) detailPatch.spotifyUrl = linked.spotifyUrl;
+  }
+  if (!detailPatch.appleMusicUrl && detailPatch.spotifyUrl) {
+    const linked = await resolveLinkedStreamingUrls(detailPatch.spotifyUrl);
+    if (linked.appleMusicUrl) detailPatch.appleMusicUrl = linked.appleMusicUrl;
   }
 
   const coverUrls = [
@@ -1192,7 +1220,7 @@ export default function App() {
   const [yearFilter, setYearFilter] = useState("all");
   const [labelFilter, setLabelFilter] = useState("all");
   const [favoriteFilter, setFavoriteFilter] = useState("all");
-  const [sortBy, setSortBy] = useState("newest");
+  const [sortBy, setSortBy] = useState("dateAddedDesc");
   const [importMode, setImportMode] = useState("cover");
   const [theme, setTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
@@ -1310,7 +1338,6 @@ export default function App() {
         record.acquiredFrom,
         record.country,
         record.releaseStatus,
-        record.wantsBetterArtwork ? "better artwork artwork upgrade" : "",
       ]
         .join(" ")
         .toLowerCase();
@@ -1335,10 +1362,16 @@ export default function App() {
     });
 
     return filtered.sort((a, b) => {
-      if (sortBy === "artist") return a.artist.localeCompare(b.artist);
-      if (sortBy === "year") return (a.year || "9999").localeCompare(b.year || "9999");
-      if (sortBy === "title") return a.title.localeCompare(b.title);
-      return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
+      const dateA = new Date(a.savedAt || a.updatedAt || a.createdAt || 0);
+      const dateB = new Date(b.savedAt || b.updatedAt || b.createdAt || 0);
+      if (sortBy === "artistAsc") return a.artist.localeCompare(b.artist);
+      if (sortBy === "artistDesc") return b.artist.localeCompare(a.artist);
+      if (sortBy === "titleAsc") return a.title.localeCompare(b.title);
+      if (sortBy === "titleDesc") return b.title.localeCompare(a.title);
+      if (sortBy === "yearAsc") return (a.year || "9999").localeCompare(b.year || "9999");
+      if (sortBy === "yearDesc") return (b.year || "0000").localeCompare(a.year || "0000");
+      if (sortBy === "dateAddedAsc") return dateA - dateB;
+      return dateB - dateA;
     });
   }, [
     artistFilter,
@@ -1547,7 +1580,11 @@ export default function App() {
   }
 
   function saveRecord(recordId) {
-    updateRecord(recordId, { status: "saved" });
+    const record = records.find((current) => current.id === recordId);
+    updateRecord(recordId, {
+      status: "saved",
+      savedAt: record?.savedAt || new Date().toISOString(),
+    });
     const nextDraft = drafts.find((draft) => draft.id !== recordId);
     setSelectedId(nextDraft?.id || "");
     setActiveTab(nextDraft ? "review" : "collection");
@@ -1694,6 +1731,7 @@ export default function App() {
             years={years}
             labels={labels}
             moveToReview={moveToReview}
+            updateRecord={updateRecord}
             removeRecord={removeRecord}
             backupRecords={() => downloadFullBackup(records)}
             restoreBackup={() => backupInputRef.current?.click()}
@@ -2165,7 +2203,7 @@ function RecordForm({ record, onChange }) {
     ["releaseStatus", "Status"],
     ["length", "Length"],
     ["cost", "Cost"],
-    ["acquiredFrom", "Where I got it"],
+    ["acquiredFrom", "Source"],
   ];
 
   return (
@@ -2177,14 +2215,6 @@ function RecordForm({ record, onChange }) {
           onChange={(event) => onChange({ favorite: event.target.checked })}
         />
         <span>Favorite record</span>
-      </label>
-      <label className="checkbox-field full-span">
-        <input
-          type="checkbox"
-          checked={Boolean(record.wantsBetterArtwork)}
-          onChange={(event) => onChange({ wantsBetterArtwork: event.target.checked })}
-        />
-        <span>Want better artwork</span>
       </label>
       <GenreSelector
         value={record.genre || ""}
@@ -2688,6 +2718,7 @@ function CollectionView({
   years,
   labels,
   moveToReview,
+  updateRecord,
   removeRecord,
   backupRecords,
   restoreBackup,
@@ -2695,6 +2726,7 @@ function CollectionView({
 }) {
   const [viewMode, setViewMode] = useState("details");
   const [gridColumns, setGridColumns] = useState(4);
+  const [detailRecord, setDetailRecord] = useState(null);
   const columnCount = Number(gridColumns);
   const rowCount = Math.max(1, Math.ceil(filteredCollection.length / columnCount));
 
@@ -2741,7 +2773,7 @@ function CollectionView({
     setYearFilter("all");
     setLabelFilter("all");
     setFavoriteFilter("all");
-    setSortBy("newest");
+    setSortBy("dateAddedDesc");
   }
 
   return (
@@ -2821,8 +2853,26 @@ function CollectionView({
           value={sortBy}
           onChange={setSortBy}
           allLabel=""
-          options={["newest", "artist", "title", "year"]}
-          labels={{ newest: "Newest", artist: "Artist", title: "Title", year: "Year" }}
+          options={[
+            "dateAddedDesc",
+            "dateAddedAsc",
+            "yearDesc",
+            "yearAsc",
+            "artistAsc",
+            "artistDesc",
+            "titleAsc",
+            "titleDesc",
+          ]}
+          labels={{
+            dateAddedDesc: "Date added newest",
+            dateAddedAsc: "Date added oldest",
+            yearDesc: "Year newest",
+            yearAsc: "Year oldest",
+            artistAsc: "Artist A-Z",
+            artistDesc: "Artist Z-A",
+            titleAsc: "Album A-Z",
+            titleDesc: "Album Z-A",
+          }}
         />
       </aside>
 
@@ -2939,14 +2989,11 @@ function CollectionView({
                         ))}
                       </div>
                     ) : null}
-                    {splitGenres(record.genre).length || record.wantsBetterArtwork ? (
+                    {splitGenres(record.genre).length ? (
                       <div className="album-genre-row">
                         {splitGenres(record.genre).slice(0, 3).map((genre) => (
                           <span key={genre}>{genre}</span>
                         ))}
-                        {record.wantsBetterArtwork ? (
-                          <span className="artwork-needed">Better artwork</span>
-                        ) : null}
                       </div>
                     ) : null}
                     <dl>
@@ -2963,7 +3010,7 @@ function CollectionView({
                         <dd>{record.length || "—"}</dd>
                       </div>
                       <div>
-                        <dt>From</dt>
+                        <dt>Source</dt>
                         <dd>{record.acquiredFrom || "—"}</dd>
                       </div>
                     </dl>
@@ -3003,12 +3050,31 @@ function CollectionView({
                 ) : null}
                 <div className="card-actions">
                   <button
+                    className={record.favorite ? "icon-button favorite active" : "icon-button favorite"}
+                    type="button"
+                    onClick={() => updateRecord(record.id, { favorite: !record.favorite })}
+                    title={record.favorite ? "Remove favorite" : "Favorite record"}
+                    aria-label={record.favorite ? "Remove favorite" : "Favorite record"}
+                  >
+                    <Heart size={18} fill={record.favorite ? "currentColor" : "none"} />
+                  </button>
+                  <button
                     className="icon-button"
                     type="button"
                     onClick={() => moveToReview(record.id)}
                     title="Edit record"
+                    aria-label="Edit record"
                   >
-                    <RotateCcw size={18} />
+                    <Pencil size={18} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    onClick={() => setDetailRecord(record)}
+                    title="Record details"
+                    aria-label="Record details"
+                  >
+                    <Info size={18} />
                   </button>
                   <button
                     className="icon-button danger"
@@ -3026,7 +3092,127 @@ function CollectionView({
           <EmptyState icon={Search} title="No records match" />
         )}
       </section>
+      {detailRecord ? (
+        <RecordDetailModal
+          record={detailRecord}
+          onClose={() => setDetailRecord(null)}
+          onEdit={() => {
+            setDetailRecord(null);
+            moveToReview(detailRecord.id);
+          }}
+          onFavorite={() => {
+            const favorite = !detailRecord.favorite;
+            updateRecord(detailRecord.id, { favorite });
+            setDetailRecord({ ...detailRecord, favorite });
+          }}
+          onDelete={() => {
+            const deletedId = detailRecord.id;
+            setDetailRecord(null);
+            removeRecord(deletedId);
+          }}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function RecordDetailModal({ record, onClose, onEdit, onFavorite, onDelete }) {
+  const spotifyUrl = spotifyAlbumUrl(record);
+  const appleUrl = appleMusicAlbumUrl(record);
+  const meta = [
+    ["Artist", record.artist],
+    ["Additional artists", record.additionalArtists],
+    ["Year", record.year],
+    ["Release date", record.releaseDate],
+    ["Genre", record.genre],
+    ["Label", record.label],
+    ["Length", record.length],
+    ["Cost", record.cost],
+    ["Source", record.acquiredFrom],
+    ["Country", record.country],
+    ["Status", record.releaseStatus],
+    ["Tracks", record.trackCount],
+  ].filter(([, value]) => value);
+
+  return (
+    <div className="detail-modal-backdrop" role="presentation" onClick={onClose}>
+      <article
+        className="detail-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${record.title || "Record"} details`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button className="icon-button detail-close" type="button" onClick={onClose}>
+          <X size={18} />
+        </button>
+        <div className="detail-hero">
+          <FallbackImage
+            sources={[record.referenceArtwork, record.coverDataUrl]}
+            alt={`${record.title || "Album"} cover`}
+          />
+        </div>
+        <div className="detail-content">
+          <div>
+            <h2>{record.title || "Untitled"}</h2>
+            <p>{record.artist || "Unknown artist"}</p>
+          </div>
+          <div className="detail-actions">
+            <button
+              className={record.favorite ? "secondary-action favorite active" : "secondary-action favorite"}
+              type="button"
+              onClick={onFavorite}
+            >
+              <Heart size={18} fill={record.favorite ? "currentColor" : "none"} />
+              Favorite
+            </button>
+            <button className="secondary-action" type="button" onClick={onEdit}>
+              <Pencil size={18} />
+              Edit
+            </button>
+            <button className="secondary-action danger" type="button" onClick={onDelete}>
+              <Trash2 size={18} />
+              Delete
+            </button>
+          </div>
+          <dl className="detail-meta">
+            {meta.map(([label, value]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
+          </dl>
+          <div className="album-links">
+            {spotifyUrl ? (
+              <a href={spotifyUrl} target="_blank" rel="noreferrer">
+                <Music2 size={14} />
+                Spotify
+              </a>
+            ) : null}
+            {appleUrl ? (
+              <a href={appleUrl} target="_blank" rel="noreferrer">
+                <Music2 size={14} />
+                Apple
+              </a>
+            ) : null}
+            {record.mbid ? (
+              <a href={`https://musicbrainz.org/release/${record.mbid}`} target="_blank" rel="noreferrer">
+                <Disc3 size={14} />
+                MusicBrainz
+              </a>
+            ) : null}
+          </div>
+          {record.notes ? (
+            <section className="detail-notes">
+              <span>Notes</span>
+              <p>{record.notes}</p>
+            </section>
+          ) : null}
+          <TracklistPreview record={record} />
+        </div>
+      </article>
+    </div>
   );
 }
 
