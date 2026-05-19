@@ -59,6 +59,13 @@ button:disabled {
   margin-bottom: 24px;
 }
 
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .brand-mark {
   display: grid;
   place-items: center;
@@ -94,6 +101,21 @@ button:disabled {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.72);
   box-shadow: 0 12px 30px rgba(60, 47, 35, 0.08);
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 46px;
+  padding: 0 12px;
+  border: 1px solid rgba(29, 26, 23, 0.12);
+  border-radius: 8px;
+  color: #4e463f;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 12px 30px rgba(60, 47, 35, 0.08);
+  font-weight: 800;
 }
 
 .tab {
@@ -314,6 +336,37 @@ main {
   flex-wrap: wrap;
   justify-content: center;
   gap: 10px;
+}
+
+.import-mode-control {
+  display: inline-flex;
+  gap: 5px;
+  min-height: 44px;
+  margin-bottom: 14px;
+  padding: 5px;
+  border: 1px solid rgba(29, 26, 23, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 250, 243, 0.82);
+}
+
+.import-mode-control button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 118px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  color: #61574e;
+  background: transparent;
+  font-weight: 900;
+}
+
+.import-mode-control button.active {
+  color: #fffaf3;
+  background: #1d1a17;
 }
 
 .backup-actions {
@@ -580,6 +633,13 @@ main {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.exact-link-note {
+  margin: 0;
+  color: #756a60;
+  font-size: 0.86rem;
+  font-weight: 800;
 }
 
 .streaming-fields label {
@@ -1166,18 +1226,39 @@ main {
   transform: translateY(-50%);
   color: #897d72;
   pointer-events: none;
+  z-index: 2;
 }
 
 .field-shell input,
 .field-shell select {
   width: 100%;
   min-height: 44px;
-  padding: 0 12px 0 40px;
+  padding: 0 42px 0 46px;
   border: 1px solid rgba(29, 26, 23, 0.14);
   border-radius: 8px;
   color: #1d1a17;
   background: #fffdf8;
   outline: none;
+}
+
+.field-shell select {
+  appearance: none;
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.select-shell::after,
+.columns-control::after {
+  content: "";
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-bottom: 2px solid #4a423b;
+  border-right: 2px solid #4a423b;
+  pointer-events: none;
+  transform: translateY(-65%) rotate(45deg);
 }
 
 .genre-filter-list {
@@ -1199,7 +1280,7 @@ main {
 
 .collection-stats {
   display: grid;
-  grid-template-columns: repeat(6, minmax(128px, 1fr));
+  grid-template-columns: repeat(5, minmax(128px, 1fr));
   gap: 12px;
 }
 
@@ -1339,10 +1420,11 @@ main {
 
 .columns-control select {
   min-height: 40px;
-  padding: 0 10px 0 36px;
+  padding: 0 34px 0 40px;
   border: 0;
   color: #3d352f;
   background: transparent;
+  appearance: none;
   font-weight: 900;
   outline: none;
 }
@@ -1412,6 +1494,7 @@ main {
   position: relative;
   display: grid;
   grid-template-rows: auto 1fr;
+  align-self: start;
   overflow: hidden;
   border: 1px solid rgba(29, 26, 23, 0.1);
   border-radius: 8px;
@@ -1421,7 +1504,7 @@ main {
 
 .album-art {
   position: relative;
-  aspect-ratio: 1;
+  aspect-ratio: 1 / 1;
   background: #ebe1d5;
 }
 
@@ -1572,9 +1655,14 @@ main {
     grid-template-columns: auto 1fr;
   }
 
-  .tabs {
+  .topbar-actions {
     grid-column: 1 / -1;
     justify-self: stretch;
+  }
+
+  .tabs {
+    justify-self: stretch;
+    flex: 1;
   }
 
   .tab {
@@ -1660,6 +1748,15 @@ main {
     overflow: visible;
   }
 
+  .topbar-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .theme-toggle {
+    width: 100%;
+  }
+
   .tab {
     min-width: 0;
     gap: 5px;
@@ -1743,6 +1840,7 @@ main {
   }
 
   .upload-actions,
+  .import-mode-control,
   .wishlist-fields {
     grid-template-columns: 1fr;
   }
@@ -1753,6 +1851,11 @@ main {
   }
 
   .upload-actions button {
+    width: 100%;
+  }
+
+  .import-mode-control {
+    display: grid;
     width: 100%;
   }
 
@@ -1927,4 +2030,149 @@ main {
   .collection-grid.cover-only {
     grid-template-columns: 1fr;
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  background: #14110f;
+  color: #f5eee5;
+}
+
+:root[data-theme="dark"] body {
+  color: #f5eee5;
+  background:
+    radial-gradient(circle at top left, rgba(215, 79, 53, 0.18), transparent 30rem),
+    linear-gradient(145deg, #171310 0%, #211b16 48%, #171d1b 100%);
+}
+
+:root[data-theme="dark"] .topbar p,
+:root[data-theme="dark"] .panel-heading,
+:root[data-theme="dark"] .panel-title,
+:root[data-theme="dark"] .filter-field > span,
+:root[data-theme="dark"] .record-form label,
+:root[data-theme="dark"] .clue-form label,
+:root[data-theme="dark"] .streaming-fields label,
+:root[data-theme="dark"] .wishlist-fields label,
+:root[data-theme="dark"] .album-meta p,
+:root[data-theme="dark"] .album-meta dt,
+:root[data-theme="dark"] .collection-section-heading strong,
+:root[data-theme="dark"] .exact-link-note {
+  color: #c8baac;
+}
+
+:root[data-theme="dark"] .tabs,
+:root[data-theme="dark"] .theme-toggle,
+:root[data-theme="dark"] .queue-panel,
+:root[data-theme="dark"] .draft-list,
+:root[data-theme="dark"] .lookup-panel,
+:root[data-theme="dark"] .review-card,
+:root[data-theme="dark"] .wishlist-form,
+:root[data-theme="dark"] .wishlist-card,
+:root[data-theme="dark"] .collection-filter-panel,
+:root[data-theme="dark"] .collection-section-heading,
+:root[data-theme="dark"] .album-card,
+:root[data-theme="dark"] .streaming-panel {
+  border-color: rgba(245, 238, 229, 0.12);
+  background: rgba(34, 28, 23, 0.84);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.26);
+}
+
+:root[data-theme="dark"] .drop-zone {
+  border-color: rgba(245, 238, 229, 0.24);
+  background:
+    linear-gradient(rgba(29, 23, 19, 0.72), rgba(29, 23, 19, 0.72)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.045) 0 1px,
+      transparent 1px 34px
+    );
+}
+
+:root[data-theme="dark"] .drop-zone.dragging {
+  border-color: #e56a4e;
+  background:
+    linear-gradient(rgba(45, 30, 24, 0.86), rgba(45, 30, 24, 0.86)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(229, 106, 78, 0.18) 0 1px,
+      transparent 1px 34px
+    );
+}
+
+:root[data-theme="dark"] .tab {
+  color: #d5c8ba;
+}
+
+:root[data-theme="dark"] .tab.active,
+:root[data-theme="dark"] .segmented-control button.active,
+:root[data-theme="dark"] .import-mode-control button.active {
+  color: #181310;
+  background: #f5eee5;
+}
+
+:root[data-theme="dark"] .secondary-action,
+:root[data-theme="dark"] .icon-button,
+:root[data-theme="dark"] .segmented-control,
+:root[data-theme="dark"] .columns-control,
+:root[data-theme="dark"] .import-mode-control,
+:root[data-theme="dark"] .mini-row,
+:root[data-theme="dark"] .draft-item,
+:root[data-theme="dark"] .checkbox-field,
+:root[data-theme="dark"] .genre-selector,
+:root[data-theme="dark"] .artist-selector,
+:root[data-theme="dark"] .app-alert,
+:root[data-theme="dark"] .upload-notice,
+:root[data-theme="dark"] .clue-panel,
+:root[data-theme="dark"] .tracklist-panel,
+:root[data-theme="dark"] .evidence-box {
+  border-color: rgba(245, 238, 229, 0.12);
+  color: #f3eadf;
+  background: rgba(44, 36, 30, 0.92);
+}
+
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] .field-shell input,
+:root[data-theme="dark"] .field-shell select,
+:root[data-theme="dark"] .record-form input,
+:root[data-theme="dark"] .record-form textarea,
+:root[data-theme="dark"] .clue-form input,
+:root[data-theme="dark"] .streaming-fields input,
+:root[data-theme="dark"] .wishlist-fields input {
+  border-color: rgba(245, 238, 229, 0.16);
+  color: #f5eee5;
+  background: #201a16;
+}
+
+:root[data-theme="dark"] .field-shell svg,
+:root[data-theme="dark"] .columns-control svg,
+:root[data-theme="dark"] .empty-state,
+:root[data-theme="dark"] .match-card span,
+:root[data-theme="dark"] .match-card small,
+:root[data-theme="dark"] .wishlist-meta span,
+:root[data-theme="dark"] .wishlist-meta p {
+  color: #b9aa9b;
+}
+
+:root[data-theme="dark"] .select-shell::after,
+:root[data-theme="dark"] .columns-control::after {
+  border-color: #d7cabd;
+}
+
+:root[data-theme="dark"] .album-meta h2,
+:root[data-theme="dark"] .album-meta dd,
+:root[data-theme="dark"] .collection-section-heading span,
+:root[data-theme="dark"] .panel-heading strong,
+:root[data-theme="dark"] .panel-title strong {
+  color: #f7efe5;
+}
+
+:root[data-theme="dark"] .album-art,
+:root[data-theme="dark"] .draft-art-placeholder,
+:root[data-theme="dark"] .album-art-placeholder,
+:root[data-theme="dark"] .wishlist-art,
+:root[data-theme="dark"] .empty-artwork {
+  color: #b8a99b;
+  background: #2b241f;
 }

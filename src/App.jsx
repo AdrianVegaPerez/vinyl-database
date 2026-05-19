@@ -23,9 +23,9 @@ import {
   Image as ImageIcon,
   FileImage,
   ImagePlus,
-  Layers3,
   Library,
   Loader2,
+  Moon,
   Music2,
   Plus,
   RotateCcw,
@@ -35,6 +35,7 @@ import {
   TableProperties,
   SlidersHorizontal,
   Sparkles,
+  Sun,
   Tags,
   Trash2,
   Upload,
@@ -49,6 +50,7 @@ const LEGACY_STORAGE_KEY = "vinyl-database-v1";
 const DB_NAME = "vinyl-database";
 const DB_VERSION = 1;
 const DB_STORE = "app";
+const THEME_STORAGE_KEY = "vinyl-database-theme";
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const SUPABASE_LIBRARY_ID = import.meta.env.VITE_SUPABASE_LIBRARY_ID || "default";
@@ -425,6 +427,16 @@ function uniqueJoin(values = []) {
   return Array.from(new Set(values.filter(Boolean))).join(", ");
 }
 
+function uniqueBy(values = [], keyFn = (value) => value) {
+  const seen = new Set();
+  return values.filter((value) => {
+    const key = keyFn(value);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function uniqueSorted(values = []) {
   return Array.from(new Set(values.filter(Boolean))).sort();
 }
@@ -545,6 +557,13 @@ function normalizeArtworkImages(images = []) {
   }));
 }
 
+function mergeArtworkOptions(...optionSets) {
+  return uniqueBy(
+    optionSets.flat().filter(Boolean),
+    (option) => option.fullUrl || option.url,
+  );
+}
+
 function extractStreamingUrls(relations = []) {
   const urls = relations
     .map((relation) => relation.url?.resource || "")
@@ -561,17 +580,54 @@ function albumSearchQuery(record) {
 }
 
 function spotifyAlbumUrl(record) {
-  return (
-    record.spotifyUrl ||
-    `https://open.spotify.com/search/${encodeURIComponent(albumSearchQuery(record))}/albums`
-  );
+  return record.spotifyUrl || "";
 }
 
 function appleMusicAlbumUrl(record) {
-  return (
-    record.appleMusicUrl ||
-    `https://music.apple.com/us/search?term=${encodeURIComponent(albumSearchQuery(record))}`
-  );
+  return record.appleMusicUrl || "";
+}
+
+async function resolveAppleMusicAlbumUrl(record) {
+  const query = albumSearchQuery(record);
+  if (!query || !record.title) return "";
+
+  try {
+    const params = new URLSearchParams({
+      term: query,
+      entity: "album",
+      media: "music",
+      limit: "12",
+    });
+    const response = await fetchWithTimeout(
+      `https://itunes.apple.com/search?${params.toString()}`,
+      {},
+      5000,
+    );
+    if (!response.ok) return "";
+    const data = await response.json();
+    const title = normalizeComparable(record.title);
+    const artist = normalizeComparable(record.artist);
+    const matches = (data.results || []).filter((result) => result.collectionViewUrl);
+    const exact = matches.find((result) => {
+      const resultTitle = normalizeComparable(result.collectionName);
+      const resultArtist = normalizeComparable(result.artistName);
+      return (
+        resultTitle === title &&
+        (!artist || resultArtist.includes(artist) || artist.includes(resultArtist))
+      );
+    });
+    const close = matches.find((result) => {
+      const resultTitle = normalizeComparable(result.collectionName);
+      const resultArtist = normalizeComparable(result.artistName);
+      return (
+        (resultTitle.includes(title) || title.includes(resultTitle)) &&
+        (!artist || resultArtist.includes(artist) || artist.includes(resultArtist))
+      );
+    });
+    return exact?.collectionViewUrl || close?.collectionViewUrl || "";
+  } catch {
+    return "";
+  }
 }
 
 function normalizeComparable(value = "") {
@@ -612,7 +668,6 @@ function downloadCollectionCsv(collection) {
     "acquired_from",
     "country",
     "status",
-    "format",
     "favorite",
     "wants_better_artwork",
     "spotify",
@@ -632,7 +687,6 @@ function downloadCollectionCsv(collection) {
     record.acquiredFrom,
     record.country,
     record.releaseStatus,
-    record.format,
     record.favorite ? "yes" : "no",
     record.wantsBetterArtwork ? "yes" : "no",
     spotifyAlbumUrl(record),
@@ -687,6 +741,7 @@ async function fetchReleaseDetails(mbid) {
   const detailsResponse = await fetchWithTimeout(detailsUrl, {}, 8000);
 
   const detailPatch = {};
+  let detailRecord = {};
   if (detailsResponse.ok) {
     const details = await detailsResponse.json();
     const tracks = details.media?.flatMap((medium) => medium.tracks || []) || [];
@@ -714,6 +769,43 @@ async function fetchReleaseDetails(mbid) {
     Object.assign(detailPatch, extractStreamingUrls(details.relations));
     if (label) detailPatch.label = label;
     if (genre) detailPatch.genre = genre;
+    detailRecord = {
+      artist:
+        details["artist-credit"]?.map((entry) => entry.name).join(", ") || "",
+      title: details.title || "",
+    };
+  }
+
+  if (detailPatch.releaseGroupId) {
+    try {
+      const groupResponse = await fetchWithTimeout(
+        `https://musicbrainz.org/ws/2/release-group/${detailPatch.releaseGroupId}?inc=genres+tags+url-rels&fmt=json`,
+        {},
+        6000,
+      );
+      if (groupResponse.ok) {
+        const group = await groupResponse.json();
+        Object.assign(
+          detailPatch,
+          Object.fromEntries(
+            Object.entries(extractStreamingUrls(group.relations)).filter(([, value]) => value),
+          ),
+        );
+        if (!detailPatch.genre) {
+          const groupGenre = pickGenre(group.genres, group.tags);
+          if (groupGenre) detailPatch.genre = groupGenre;
+        }
+      }
+    } catch {
+      // Release-group metadata is a bonus; release-level details are enough to continue.
+    }
+  }
+
+  if (!detailPatch.appleMusicUrl) {
+    detailPatch.appleMusicUrl = await resolveAppleMusicAlbumUrl({
+      ...detailRecord,
+      ...detailPatch,
+    });
   }
 
   const coverUrls = [
@@ -723,22 +815,23 @@ async function fetchReleaseDetails(mbid) {
       : "",
   ].filter(Boolean);
 
+  const allArtworkOptions = [];
   for (const coverUrl of coverUrls) {
     try {
       const coverResponse = await fetchWithTimeout(coverUrl, {}, 4500);
       if (!coverResponse.ok) continue;
       const cover = await coverResponse.json();
       const artworkOptions = normalizeArtworkImages(cover.images || []);
+      allArtworkOptions.push(...artworkOptions);
       const front = cover.images?.find((image) => image.front) || cover.images?.[0];
-      if (front?.thumbnails?.large || front?.image) {
+      if (!detailPatch.referenceArtwork && (front?.thumbnails?.large || front?.image)) {
         detailPatch.referenceArtwork = front.thumbnails?.large || front.image;
       }
-      detailPatch.artworkOptions = artworkOptions;
-      break;
     } catch {
       // Cover Art Archive occasionally lacks release-level art; the release-group fallback may still work.
     }
   }
+  detailPatch.artworkOptions = mergeArtworkOptions(allArtworkOptions);
 
   return detailPatch;
 }
@@ -1007,6 +1100,8 @@ async function lookupReleases(form) {
           tracklist: fallback.tracklist?.length ? fallback.tracklist : enrichment.tracklist,
           spotifyUrl: fallback.spotifyUrl || enrichment.spotifyUrl,
           appleMusicUrl: fallback.appleMusicUrl || enrichment.appleMusicUrl,
+          referenceArtwork: enrichment.referenceArtwork || fallback.referenceArtwork,
+          artworkOptions: mergeArtworkOptions(enrichment.artworkOptions || [], fallback.artworkOptions || []),
           additionalArtists: fallback.additionalArtists || enrichment.additionalArtists,
         }
       : fallback;
@@ -1096,9 +1191,13 @@ export default function App() {
   const [artistFilter, setArtistFilter] = useState("all");
   const [yearFilter, setYearFilter] = useState("all");
   const [labelFilter, setLabelFilter] = useState("all");
-  const [formatFilter, setFormatFilter] = useState("all");
   const [favoriteFilter, setFavoriteFilter] = useState("all");
   const [sortBy, setSortBy] = useState("newest");
+  const [importMode, setImportMode] = useState("cover");
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === "undefined") return "light";
+    return window.localStorage.getItem(THEME_STORAGE_KEY) || "light";
+  });
   const [lookupState, setLookupState] = useState({
     recordId: "",
     loading: false,
@@ -1143,6 +1242,11 @@ export default function App() {
         );
       });
   }, [records, storageReady]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   const drafts = useMemo(
     () => records.filter((record) => record.status === "draft"),
@@ -1191,18 +1295,6 @@ export default function App() {
     [collection],
   );
 
-  const formats = useMemo(() => {
-    const values = new Set();
-    collection.forEach((record) => {
-      record.format
-        ?.split(",")
-        .map((format) => format.trim())
-        .filter(Boolean)
-        .forEach((format) => values.add(format));
-    });
-    return Array.from(values).sort();
-  }, [collection]);
-
   const filteredCollection = useMemo(() => {
     const text = query.trim().toLowerCase();
     const filtered = collection.filter((record) => {
@@ -1216,7 +1308,6 @@ export default function App() {
         record.label,
         record.cost,
         record.acquiredFrom,
-        record.format,
         record.country,
         record.releaseStatus,
         record.wantsBetterArtwork ? "better artwork artwork upgrade" : "",
@@ -1232,12 +1323,6 @@ export default function App() {
         artistFilter === "all" || artistTokens(record).includes(artistFilter);
       const matchesYear = yearFilter === "all" || record.year === yearFilter;
       const matchesLabel = labelFilter === "all" || record.label === labelFilter;
-      const matchesFormat =
-        formatFilter === "all" ||
-        record.format
-          ?.split(",")
-          .map((format) => format.trim())
-          .includes(formatFilter);
       const matchesFavorite = favoriteFilter === "all" || Boolean(record.favorite);
       return (
         matchesText &&
@@ -1245,7 +1330,6 @@ export default function App() {
         matchesArtist &&
         matchesYear &&
         matchesLabel &&
-        matchesFormat &&
         matchesFavorite
       );
     });
@@ -1260,7 +1344,6 @@ export default function App() {
     artistFilter,
     collection,
     favoriteFilter,
-    formatFilter,
     genreFilter,
     labelFilter,
     query,
@@ -1277,6 +1360,10 @@ export default function App() {
   }
 
   function removeRecord(id) {
+    const record = records.find((current) => current.id === id);
+    const name = [record?.artist, record?.title].filter(Boolean).join(" - ") || "this record";
+    if (!window.confirm(`Delete ${name}? This cannot be undone.`)) return;
+
     setRecords((current) => current.filter((record) => record.id !== id));
     if (selectedId === id) {
       setSelectedId("");
@@ -1485,29 +1572,40 @@ export default function App() {
             {CLOUD_STORAGE_ENABLED ? "Cloud sync" : "Local only"}
           </p>
         </div>
-        <nav className="tabs" aria-label="Main sections">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                className={activeTab === tab.id ? "tab active" : "tab"}
-                type="button"
-                onClick={() => setActiveTab(tab.id)}
-                title={tab.label}
-              >
-                <Icon size={18} />
-                <span>{tab.label}</span>
-                {tab.id === "review" && drafts.length > 0 ? (
-                  <strong>{drafts.length}</strong>
-                ) : null}
-                {tab.id === "wishlist" && wishlist.length > 0 ? (
-                  <strong>{wishlist.length}</strong>
-                ) : null}
-              </button>
-            );
-          })}
-        </nav>
+        <div className="topbar-actions">
+          <button
+            className="theme-toggle"
+            type="button"
+            onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+          >
+            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+            <span>{theme === "dark" ? "Light" : "Dark"}</span>
+          </button>
+          <nav className="tabs" aria-label="Main sections">
+            {TABS.map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.id}
+                  className={activeTab === tab.id ? "tab active" : "tab"}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  title={tab.label}
+                >
+                  <Icon size={18} />
+                  <span>{tab.label}</span>
+                  {tab.id === "review" && drafts.length > 0 ? (
+                    <strong>{drafts.length}</strong>
+                  ) : null}
+                  {tab.id === "wishlist" && wishlist.length > 0 ? (
+                    <strong>{wishlist.length}</strong>
+                  ) : null}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
       </header>
 
       <input
@@ -1528,6 +1626,8 @@ export default function App() {
             setIsDragging={setIsDragging}
             addFiles={addFiles}
             addBarcodeFiles={addBarcodeFiles}
+            importMode={importMode}
+            setImportMode={setImportMode}
             restoreBackup={restoreBackup}
             backupRecords={() => downloadFullBackup(records)}
             drafts={drafts}
@@ -1585,8 +1685,6 @@ export default function App() {
             setYearFilter={setYearFilter}
             labelFilter={labelFilter}
             setLabelFilter={setLabelFilter}
-            formatFilter={formatFilter}
-            setFormatFilter={setFormatFilter}
             favoriteFilter={favoriteFilter}
             setFavoriteFilter={setFavoriteFilter}
             sortBy={sortBy}
@@ -1595,7 +1693,6 @@ export default function App() {
             artists={artists}
             years={years}
             labels={labels}
-            formats={formats}
             moveToReview={moveToReview}
             removeRecord={removeRecord}
             backupRecords={() => downloadFullBackup(records)}
@@ -1616,6 +1713,8 @@ function UploadView({
   setIsDragging,
   addFiles,
   addBarcodeFiles,
+  importMode,
+  setImportMode,
   restoreBackup,
   backupRecords,
   records,
@@ -1637,7 +1736,11 @@ function UploadView({
         onDrop={(event) => {
           event.preventDefault();
           setIsDragging(false);
-          addFiles(event.dataTransfer.files);
+          if (importMode === "barcode") {
+            addBarcodeFiles(event.dataTransfer.files);
+          } else {
+            addFiles(event.dataTransfer.files);
+          }
         }}
       >
         <input
@@ -1669,8 +1772,30 @@ function UploadView({
           </div>
         </div>
         <div className="drop-copy">
-          <h2>Add record covers</h2>
-          <p>JPG, PNG, or WebP</p>
+          <h2>Batch add records</h2>
+          <p>
+            {importMode === "barcode"
+              ? "Drop barcode photos to identify albums right away"
+              : "Drop cover photos to place them in Review"}
+          </p>
+        </div>
+        <div className="import-mode-control" aria-label="Upload photo type">
+          <button
+            className={importMode === "cover" ? "active" : ""}
+            type="button"
+            onClick={() => setImportMode("cover")}
+          >
+            <ImagePlus size={17} />
+            Covers
+          </button>
+          <button
+            className={importMode === "barcode" ? "active" : ""}
+            type="button"
+            onClick={() => setImportMode("barcode")}
+          >
+            <ScanBarcode size={17} />
+            Barcodes
+          </button>
         </div>
         <div className="upload-actions">
           <button
@@ -1684,7 +1809,7 @@ function UploadView({
             ) : (
               <Plus size={18} />
             )}
-            {!storageReady ? "Opening Database" : isImporting ? "Importing" : "Select Images"}
+            {!storageReady ? "Opening Database" : isImporting ? "Importing" : "Select Cover Photos"}
           </button>
           <button
             className="secondary-action"
@@ -1693,7 +1818,7 @@ function UploadView({
             disabled={isImporting || !storageReady}
           >
             <ScanBarcode size={18} />
-            Select Barcode
+            Select Barcode Photos
           </button>
         </div>
         {uploadNotice ? (
@@ -2038,7 +2163,6 @@ function RecordForm({ record, onChange }) {
     ["label", "Label"],
     ["country", "Country"],
     ["releaseStatus", "Status"],
-    ["format", "Format"],
     ["length", "Length"],
     ["cost", "Cost"],
     ["acquiredFrom", "Where I got it"],
@@ -2224,6 +2348,7 @@ function GenreSelector({ value, onChange }) {
 function StreamingLinksPanel({ record, onChange }) {
   const spotifyUrl = spotifyAlbumUrl(record);
   const appleUrl = appleMusicAlbumUrl(record);
+  const hasExactLinks = Boolean(spotifyUrl || appleUrl);
 
   return (
     <section className="streaming-panel">
@@ -2231,23 +2356,33 @@ function StreamingLinksPanel({ record, onChange }) {
         <span>Streaming links</span>
         <Music2 size={18} />
       </div>
-      <div className="album-links">
-        <a href={spotifyUrl} target="_blank" rel="noreferrer">
-          <Music2 size={14} />
-          Spotify
-        </a>
-        <a href={appleUrl} target="_blank" rel="noreferrer">
-          <Music2 size={14} />
-          Apple Music
-        </a>
-      </div>
+      {hasExactLinks ? (
+        <div className="album-links">
+          {spotifyUrl ? (
+            <a href={spotifyUrl} target="_blank" rel="noreferrer">
+              <Music2 size={14} />
+              Spotify
+            </a>
+          ) : null}
+          {appleUrl ? (
+            <a href={appleUrl} target="_blank" rel="noreferrer">
+              <Music2 size={14} />
+              Apple Music
+            </a>
+          ) : null}
+        </div>
+      ) : (
+        <p className="exact-link-note">
+          Exact album links appear here when MusicBrainz or Apple Music confirms them.
+        </p>
+      )}
       <div className="streaming-fields">
         <label>
           <span>Spotify album URL</span>
           <input
             value={record.spotifyUrl || ""}
             onChange={(event) => onChange({ spotifyUrl: event.target.value })}
-            placeholder={spotifyUrl}
+            placeholder="Paste exact Spotify album URL"
           />
         </label>
         <label>
@@ -2255,7 +2390,7 @@ function StreamingLinksPanel({ record, onChange }) {
           <input
             value={record.appleMusicUrl || ""}
             onChange={(event) => onChange({ appleMusicUrl: event.target.value })}
-            placeholder={appleUrl}
+            placeholder="Paste exact Apple Music album URL"
           />
         </label>
       </div>
@@ -2353,7 +2488,6 @@ function LookupPanel({ lookupState, recordId, onApply }) {
               <div>
                 <div className="match-badges">
                   <span>{result.source || "MusicBrainz"}</span>
-                  {result.format ? <span>{result.format}</span> : null}
                   {result.score ? <span>{result.score}%</span> : null}
                 </div>
                 <strong>{result.title}</strong>
@@ -2369,7 +2503,7 @@ function LookupPanel({ lookupState, recordId, onApply }) {
                     .join(" · ")}
                 </small>
                 <em>
-                  {[isVinylRelease(result) ? "Vinyl" : "", result.genre, result.length]
+                  {[result.genre, result.length]
                     .filter(Boolean)
                     .join(" · ")}
                 </em>
@@ -2485,16 +2619,22 @@ function WishlistView({ wishlist, addWishlistItem, moveToReview, removeRecord })
                   </em>
                 ) : null}
                 {record.notes ? <p>{record.notes}</p> : null}
-                <div className="album-links">
-                  <a href={spotifyAlbumUrl(record)} target="_blank" rel="noreferrer">
-                    <Music2 size={14} />
-                    Spotify
-                  </a>
-                  <a href={appleMusicAlbumUrl(record)} target="_blank" rel="noreferrer">
-                    <Music2 size={14} />
-                    Apple
-                  </a>
-                </div>
+                {spotifyAlbumUrl(record) || appleMusicAlbumUrl(record) ? (
+                  <div className="album-links">
+                    {spotifyAlbumUrl(record) ? (
+                      <a href={spotifyAlbumUrl(record)} target="_blank" rel="noreferrer">
+                        <Music2 size={14} />
+                        Spotify
+                      </a>
+                    ) : null}
+                    {appleMusicAlbumUrl(record) ? (
+                      <a href={appleMusicAlbumUrl(record)} target="_blank" rel="noreferrer">
+                        <Music2 size={14} />
+                        Apple
+                      </a>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
               <div className="wishlist-actions">
                 <button
@@ -2539,8 +2679,6 @@ function CollectionView({
   setYearFilter,
   labelFilter,
   setLabelFilter,
-  formatFilter,
-  setFormatFilter,
   favoriteFilter,
   setFavoriteFilter,
   sortBy,
@@ -2549,7 +2687,6 @@ function CollectionView({
   artists,
   years,
   labels,
-  formats,
   moveToReview,
   removeRecord,
   backupRecords,
@@ -2580,14 +2717,12 @@ function CollectionView({
     (artistFilter !== "all" ? 1 : 0) +
     (yearFilter !== "all" ? 1 : 0) +
     (labelFilter !== "all" ? 1 : 0) +
-    (formatFilter !== "all" ? 1 : 0) +
     (favoriteFilter !== "all" ? 1 : 0);
   const stats = [
     { label: "Records", value: collection.length, icon: Library, tone: "indigo" },
     { label: "Artists", value: artists.length, icon: Users, tone: "blue" },
     { label: "Genres", value: genres.length, icon: Tags, tone: "green" },
     { label: "Labels", value: labels.length, icon: Building2, tone: "gold" },
-    { label: "Formats", value: formats.length, icon: Layers3, tone: "red" },
     { label: "Favorites", value: favoriteCount, icon: Heart, tone: "purple" },
   ];
 
@@ -2605,7 +2740,6 @@ function CollectionView({
     setArtistFilter("all");
     setYearFilter("all");
     setLabelFilter("all");
-    setFormatFilter("all");
     setFavoriteFilter("all");
     setSortBy("newest");
   }
@@ -2671,14 +2805,6 @@ function CollectionView({
           onChange={setLabelFilter}
           allLabel="All labels"
           options={labels}
-        />
-        <FilterSelect
-          icon={Layers3}
-          label="Format"
-          value={formatFilter}
-          onChange={setFormatFilter}
-          allLabel="All formats"
-          options={formats}
         />
         <FilterSelect
           icon={Heart}
@@ -2837,43 +2963,31 @@ function CollectionView({
                         <dd>{record.length || "—"}</dd>
                       </div>
                       <div>
-                        <dt>Cost</dt>
-                        <dd>{record.cost || "—"}</dd>
-                      </div>
-                      <div>
                         <dt>From</dt>
                         <dd>{record.acquiredFrom || "—"}</dd>
                       </div>
-                      <div>
-                        <dt>Format</dt>
-                        <dd>{record.format || "—"}</dd>
-                      </div>
-                      <div>
-                        <dt>Country</dt>
-                        <dd>{record.country || "—"}</dd>
-                      </div>
-                      <div>
-                        <dt>Status</dt>
-                        <dd>{record.releaseStatus || "—"}</dd>
-                      </div>
                     </dl>
                     <div className="album-links">
-                      <a
-                        href={spotifyAlbumUrl(record)}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        <Music2 size={14} />
-                        Spotify
-                      </a>
-                      <a
-                        href={appleMusicAlbumUrl(record)}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        <Music2 size={14} />
-                        Apple
-                      </a>
+                      {spotifyAlbumUrl(record) ? (
+                        <a
+                          href={spotifyAlbumUrl(record)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <Music2 size={14} />
+                          Spotify
+                        </a>
+                      ) : null}
+                      {appleMusicAlbumUrl(record) ? (
+                        <a
+                          href={appleMusicAlbumUrl(record)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <Music2 size={14} />
+                          Apple
+                        </a>
+                      ) : null}
                       {record.mbid ? (
                         <a
                           href={`https://musicbrainz.org/release/${record.mbid}`}
@@ -2928,7 +3042,7 @@ function FilterSelect({
   return (
     <label className="filter-field">
       <span>{label}</span>
-      <div className="field-shell">
+      <div className="field-shell select-shell">
         <Icon size={18} />
         <select value={value} onChange={(event) => onChange(event.target.value)}>
           {allLabel ? <option value="all">{allLabel}</option> : null}
