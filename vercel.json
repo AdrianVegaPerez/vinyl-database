@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/upcitemdb/:path*",
+      "destination": "https://api.upcitemdb.com/prod/trial/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/"
+    }
+  ]
+}
