@@ -3065,7 +3065,7 @@ function CollectionView({
 
         {filteredCollection.length ? (
           <div
-            className={viewMode === "covers" ? "collection-grid cover-only" : "collection-grid"}
+            className={viewMode === "covers" ? "collection-grid cover-only" : "collection-grid details-grid"}
             style={{ "--columns": columnCount }}
           >
             {filteredCollection.map((record) => (
