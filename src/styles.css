@@ -338,6 +338,10 @@ main {
   gap: 10px;
 }
 
+.mobile-capture-action {
+  min-width: min(100%, 250px);
+}
+
 .import-mode-control {
   display: inline-flex;
   gap: 5px;
@@ -1974,6 +1978,11 @@ main {
 
   .upload-actions button {
     width: 100%;
+  }
+
+  .mobile-capture-action {
+    min-height: 52px;
+    font-size: 1.02rem;
   }
 
   .import-mode-control {

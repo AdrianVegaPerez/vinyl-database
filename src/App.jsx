@@ -662,6 +662,78 @@ function normalizeComparable(value = "") {
     .trim();
 }
 
+function searchTokens(value = "") {
+  return normalizeComparable(value)
+    .split(" ")
+    .filter((token) => token.length > 1);
+}
+
+function editDistance(a = "", b = "") {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+
+  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  const current = Array(b.length + 1).fill(0);
+
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + cost,
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+
+  return previous[b.length];
+}
+
+function fuzzyTokenMatch(searchToken, targetToken) {
+  if (!searchToken || !targetToken) return false;
+  if (targetToken.includes(searchToken) || searchToken.includes(targetToken)) return true;
+  if (searchToken.length < 4) return false;
+
+  const allowedDistance = searchToken.length >= 7 ? 2 : 1;
+  return editDistance(searchToken, targetToken) <= allowedDistance;
+}
+
+function matchesSmartSearch(record, query) {
+  const search = normalizeComparable(query);
+  if (!search) return true;
+
+  const values = [
+    record.artist,
+    record.additionalArtists,
+    ...artistTokens(record),
+    record.title,
+    record.year,
+    record.genre,
+    record.label,
+    record.cost,
+    record.acquiredFrom,
+    record.country,
+    record.releaseStatus,
+    record.scannedBarcode,
+  ];
+  const normalizedValues = values.map(normalizeComparable).filter(Boolean);
+  const haystack = normalizedValues.join(" ");
+  const compactHaystack = haystack.replace(/\s+/g, "");
+  const compactSearch = search.replace(/\s+/g, "");
+
+  if (haystack.includes(search) || compactHaystack.includes(compactSearch)) {
+    return true;
+  }
+
+  const targetTokens = searchTokens(normalizedValues.join(" "));
+  return searchTokens(search).every((token) =>
+    targetTokens.some((targetToken) => fuzzyTokenMatch(token, targetToken)),
+  );
+}
+
 function cleanBarcode(value = "") {
   return String(value).replace(/\D/g, "");
 }
@@ -1235,6 +1307,8 @@ export default function App() {
   });
   const fileInputRef = useRef(null);
   const barcodeInputRef = useRef(null);
+  const coverCameraInputRef = useRef(null);
+  const barcodeCameraInputRef = useRef(null);
   const backupInputRef = useRef(null);
 
   useEffect(() => {
@@ -1324,24 +1398,8 @@ export default function App() {
   );
 
   const filteredCollection = useMemo(() => {
-    const text = query.trim().toLowerCase();
     const filtered = collection.filter((record) => {
-      const haystack = [
-        record.artist,
-        record.additionalArtists,
-        ...artistTokens(record),
-        record.title,
-        record.year,
-        record.genre,
-        record.label,
-        record.cost,
-        record.acquiredFrom,
-        record.country,
-        record.releaseStatus,
-      ]
-        .join(" ")
-        .toLowerCase();
-      const matchesText = !text || haystack.includes(text);
+      const matchesText = matchesSmartSearch(record, query);
       const recordGenres = splitGenres(record.genre);
       const matchesGenre =
         genreFilter.length === 0 ||
@@ -1658,6 +1716,8 @@ export default function App() {
           <UploadView
             fileInputRef={fileInputRef}
             barcodeInputRef={barcodeInputRef}
+            coverCameraInputRef={coverCameraInputRef}
+            barcodeCameraInputRef={barcodeCameraInputRef}
             backupInputRef={backupInputRef}
             isDragging={isDragging}
             setIsDragging={setIsDragging}
@@ -1746,6 +1806,8 @@ export default function App() {
 function UploadView({
   fileInputRef,
   barcodeInputRef,
+  coverCameraInputRef,
+  barcodeCameraInputRef,
   backupInputRef,
   isDragging,
   setIsDragging,
@@ -1801,6 +1863,26 @@ function UploadView({
             event.target.value = "";
           }}
         />
+        <input
+          ref={coverCameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={(event) => {
+            addFiles(event.target.files);
+            event.target.value = "";
+          }}
+        />
+        <input
+          ref={barcodeCameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={(event) => {
+            addBarcodeFiles(event.target.files);
+            event.target.value = "";
+          }}
+        />
         <div className="record-visual" aria-hidden="true">
           <div className="vinyl-disc">
             <span />
@@ -1837,17 +1919,36 @@ function UploadView({
         </div>
         <div className="upload-actions">
           <button
-            className="primary-action"
+            className="primary-action mobile-capture-action"
             type="button"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() =>
+              importMode === "barcode"
+                ? barcodeCameraInputRef.current?.click()
+                : coverCameraInputRef.current?.click()
+            }
             disabled={isImporting || !storageReady}
           >
             {isImporting || !storageReady ? (
               <Loader2 className="spin" size={18} />
             ) : (
-              <Plus size={18} />
+              <Camera size={18} />
             )}
-            {!storageReady ? "Opening Database" : isImporting ? "Importing" : "Select Cover Photos"}
+            {!storageReady
+              ? "Opening Database"
+              : isImporting
+                ? "Importing"
+                : importMode === "barcode"
+                  ? "Take Barcode Photo"
+                  : "Take Cover Photo"}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isImporting || !storageReady}
+          >
+            <ImagePlus size={18} />
+            Batch Cover Photos
           </button>
           <button
             className="secondary-action"
@@ -1856,7 +1957,7 @@ function UploadView({
             disabled={isImporting || !storageReady}
           >
             <ScanBarcode size={18} />
-            Select Barcode Photos
+            Batch Barcode Photos
           </button>
         </div>
         {uploadNotice ? (
@@ -2791,7 +2892,7 @@ function CollectionView({
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Artist, title, label..."
+              placeholder="Artist, title, label, typo ok..."
             />
           </div>
         </label>
