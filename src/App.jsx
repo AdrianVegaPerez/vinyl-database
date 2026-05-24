@@ -90,6 +90,7 @@ const EMPTY_FORM = {
   releaseGroupId: "",
   spotifyUrl: "",
   appleMusicUrl: "",
+  lookupUrl: "",
   scannedBarcode: "",
   tracklist: [],
 };
@@ -687,6 +688,271 @@ async function resolveLinkedStreamingUrls(sourceUrl = "") {
   }
 }
 
+function extractAppleMusicCollectionId(value = "") {
+  try {
+    const url = new URL(String(value).trim());
+    const pathMatch = url.pathname.match(/(?:\/id)?(\d+)(?:$|[/?#])/i);
+    return pathMatch?.[1] || "";
+  } catch {
+    return /^\d+$/.test(String(value).trim()) ? String(value).trim() : "";
+  }
+}
+
+function highResolutionAppleArtwork(url = "") {
+  return url.replace(/\/\d+x\d+bb\.(jpg|png|webp)$/i, "/1200x1200bb.$1");
+}
+
+function cleanAppleLabel(copyright = "") {
+  return copyright
+    .replace(/^(?:This Compilation\s+)?[\u2117\u00a9]\s*\d{4}\s*/i, "")
+    .replace(/\s+under exclusive license.*$/i, "")
+    .replace(/\.?\s*All rights reserved\.?$/i, "")
+    .trim();
+}
+
+function normalizeAppleMusicLookup(data, sourceUrl = "") {
+  const results = data.results || [];
+  const collection =
+    results.find((result) => result.wrapperType === "collection") ||
+    results.find((result) => result.collectionId);
+  if (!collection) return null;
+
+  const tracks = results
+    .filter((result) => result.wrapperType === "track")
+    .sort((a, b) => (a.trackNumber || 0) - (b.trackNumber || 0));
+  const tracklist = tracks.map((track, index) => ({
+    id: `apple-${collection.collectionId}-${track.trackId || index}`,
+    position: track.trackNumber ? String(track.trackNumber) : String(index + 1),
+    title: track.trackName || "Untitled track",
+    length: formatDuration(track.trackTimeMillis || 0),
+    medium: track.discNumber || 1,
+  }));
+  const length = formatDuration(
+    tracks.reduce((total, track) => total + (track.trackTimeMillis || 0), 0),
+  );
+  const releaseDate = collection.releaseDate?.slice(0, 10) || "";
+  const artworkUrl = highResolutionAppleArtwork(collection.artworkUrl100 || "");
+  const trackGenres = tracks.map((track) => track.primaryGenreName).filter(Boolean);
+
+  return {
+    id: `apple-${collection.collectionId}`,
+    artist: collection.artistName || "",
+    additionalArtists: joinArtists(splitArtistCredit(collection.artistName || "")),
+    title: collection.collectionName || "",
+    year: releaseDate.slice(0, 4),
+    releaseDate,
+    genre: joinGenres([collection.primaryGenreName, ...trackGenres]),
+    label: cleanAppleLabel(collection.copyright || ""),
+    length,
+    trackCount: tracklist.length ? String(tracklist.length) : "",
+    tracklist,
+    source: "Apple Music",
+    appleMusicUrl: collection.collectionViewUrl || sourceUrl,
+    referenceArtwork: artworkUrl,
+    artworkOptions: artworkUrl
+      ? [{
+          id: `apple-art-${collection.collectionId}`,
+          url: artworkUrl,
+          fullUrl: artworkUrl,
+          label: "Apple Music artwork",
+          isFront: true,
+        }]
+      : [],
+  };
+}
+
+async function fetchAppleMusicAlbumDetails(albumUrlOrId) {
+  const collectionId = extractAppleMusicCollectionId(albumUrlOrId);
+  if (!collectionId) return null;
+
+  const params = new URLSearchParams({
+    id: collectionId,
+    entity: "song",
+  });
+  const response = await fetchWithTimeout(
+    `https://itunes.apple.com/lookup?${params.toString()}`,
+    {},
+    6000,
+  );
+  if (!response.ok) return null;
+  return normalizeAppleMusicLookup(await response.json(), albumUrlOrId);
+}
+
+function parseAlbumLookupUrl(value = "") {
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("Paste a complete album URL that starts with https://.");
+  }
+
+  const host = url.hostname.replace(/^www\./i, "").toLowerCase();
+  const path = url.pathname;
+
+  if (host.endsWith("discogs.com")) {
+    const releaseMatch =
+      path.match(/\/(?:release|releases)\/(\d+)/i) ||
+      path.match(/\/sell\/release\/(\d+)/i);
+    if (releaseMatch) {
+      return { type: "discogs-release", id: releaseMatch[1], url: raw };
+    }
+
+    const masterMatch = path.match(/\/(?:master|masters)\/(\d+)/i);
+    if (masterMatch) {
+      return { type: "discogs-master", id: masterMatch[1], url: raw };
+    }
+  }
+
+  if (host.endsWith("musicbrainz.org")) {
+    const releaseMatch = path.match(/\/release\/([0-9a-f-]{36})/i);
+    if (releaseMatch) {
+      return { type: "musicbrainz-release", id: releaseMatch[1], url: raw };
+    }
+
+    const releaseGroupMatch = path.match(/\/release-group\/([0-9a-f-]{36})/i);
+    if (releaseGroupMatch) {
+      return { type: "musicbrainz-release-group", id: releaseGroupMatch[1], url: raw };
+    }
+  }
+
+  if (host === "open.spotify.com") {
+    const albumMatch = path.match(/\/album\/([A-Za-z0-9]+)/i);
+    if (albumMatch) {
+      return { type: "spotify-album", id: albumMatch[1], url: raw };
+    }
+  }
+
+  if (host === "music.apple.com" || host === "itunes.apple.com") {
+    const collectionId = extractAppleMusicCollectionId(raw);
+    if (collectionId) {
+      return { type: "apple-music-album", id: collectionId, url: raw };
+    }
+  }
+
+  throw new Error("Use a Discogs release, MusicBrainz release, Apple Music album, or Spotify album link.");
+}
+
+async function fetchDiscogsMasterDetails(masterId, searchResult = {}, options = {}) {
+  if (!masterId) return {};
+
+  const response = await fetchWithTimeout(
+    discogsApiUrl(`masters/${masterId}`),
+    {},
+    8000,
+  );
+  if (!response.ok) return {};
+  const details = await response.json();
+
+  if (details.main_release) {
+    try {
+      const releaseDetails = await fetchDiscogsReleaseDetails(
+        details.main_release,
+        searchResult,
+        options,
+      );
+      if (Object.keys(releaseDetails).length) return releaseDetails;
+    } catch {
+      // Master metadata below is still a useful fallback.
+    }
+  }
+
+  const tracklist = (details.tracklist || [])
+    .filter((track) => track.type_ === "track")
+    .map((track, index) => ({
+      id: `discogs-master-${masterId}-${track.position || index}`,
+      position: track.position || String(index + 1),
+      title: track.title || "Untitled track",
+      length: track.duration || "",
+      medium: 1,
+    }));
+  const length = formatSeconds(
+    tracklist.reduce((total, track) => total + parseDurationSeconds(track.length), 0),
+  );
+  const artist = uniqueJoin((details.artists || []).map((artistEntry) => artistEntry.name));
+  const artworkOptions = normalizeDiscogsArtwork(details.images || [], searchResult);
+
+  return Object.fromEntries(
+    Object.entries({
+      id: `discogs-master-${masterId}`,
+      artist,
+      additionalArtists: joinArtists(splitArtistCredit(artist)),
+      title: details.title || "",
+      year: details.year ? String(details.year) : "",
+      releaseDate: details.year ? String(details.year) : "",
+      genre: joinGenres([...(details.genres || []), ...(details.styles || [])]),
+      length,
+      trackCount: tracklist.length ? String(tracklist.length) : "",
+      tracklist,
+      source: "Discogs",
+      discogsId: String(masterId),
+      discogsUrl: details.uri || searchResult.discogsUrl || "",
+      artworkOptions,
+      referenceArtwork: artworkOptions[0]?.url || "",
+    }).filter(([, value]) =>
+      Array.isArray(value) ? value.length : Boolean(value),
+    ),
+  );
+}
+
+async function fetchSpotifyAlbumPageDetails(url) {
+  const linked = await resolveLinkedStreamingUrls(url);
+  if (linked.appleMusicUrl) {
+    const appleDetails = await fetchAppleMusicAlbumDetails(linked.appleMusicUrl);
+    if (appleDetails) {
+      return {
+        ...appleDetails,
+        spotifyUrl: linked.spotifyUrl || url,
+        appleMusicUrl: linked.appleMusicUrl,
+        source: "Apple Music + Spotify",
+      };
+    }
+  }
+
+  try {
+    const params = new URLSearchParams({ url });
+    const response = await fetchWithTimeout(
+      `https://open.spotify.com/oembed?${params.toString()}`,
+      {},
+      4500,
+    );
+    if (!response.ok) return {
+      id: `spotify-${url}`,
+      source: "Spotify",
+      spotifyUrl: url,
+    };
+    const data = await response.json();
+    const parsed = parseUpcAlbumTitle(data.title || "");
+    const artworkUrl = data.thumbnail_url || "";
+    return {
+      id: `spotify-${url}`,
+      artist: parsed.artist,
+      additionalArtists: joinArtists(splitArtistCredit(parsed.artist)),
+      title: parsed.title || data.title || "",
+      source: "Spotify",
+      spotifyUrl: url,
+      referenceArtwork: artworkUrl,
+      artworkOptions: artworkUrl
+        ? [{
+            id: `spotify-art-${url}`,
+            url: artworkUrl,
+            fullUrl: artworkUrl,
+            label: "Spotify artwork",
+            isFront: true,
+          }]
+        : [],
+    };
+  } catch {
+    return {
+      id: `spotify-${url}`,
+      source: "Spotify",
+      spotifyUrl: url,
+    };
+  }
+}
+
 function normalizeComparable(value = "") {
   return String(value)
     .toLowerCase()
@@ -928,7 +1194,15 @@ async function fetchReleaseDetails(mbid, options = {}) {
     const releaseGroupTags = details["release-group"]?.genres || details["release-group"]?.tags || [];
     const genre = pickGenre(details.genres, details.tags, releaseGroupTags);
     const tracklist = normalizeTracklist(details.media);
+    const artist =
+      details["artist-credit"]?.map((entry) => entry.name).join(", ") || "";
 
+    detailPatch.mbid = mbid;
+    if (artist) {
+      detailPatch.artist = artist;
+      detailPatch.additionalArtists = joinArtists(splitArtistCredit(artist));
+    }
+    if (details.title) detailPatch.title = details.title;
     detailPatch.length = formatDuration(length);
     if (details.date) {
       detailPatch.releaseDate = details.date;
@@ -945,8 +1219,7 @@ async function fetchReleaseDetails(mbid, options = {}) {
     if (label) detailPatch.label = label;
     if (genre) detailPatch.genre = genre;
     detailRecord = {
-      artist:
-        details["artist-credit"]?.map((entry) => entry.name).join(", ") || "",
+      artist,
       title: details.title || "",
     };
   }
@@ -1017,6 +1290,129 @@ async function fetchReleaseDetails(mbid, options = {}) {
   detailPatch.artworkOptions = mergeArtworkOptions(allArtworkOptions);
 
   return detailPatch;
+}
+
+async function fetchReleaseGroupDetails(releaseGroupId, options = {}) {
+  if (!releaseGroupId) return {};
+
+  const response = await fetchWithTimeout(
+    `https://musicbrainz.org/ws/2/release-group/${releaseGroupId}?inc=artist-credits+genres+tags+url-rels+releases&fmt=json`,
+    {},
+    8000,
+  );
+  if (!response.ok) return {};
+
+  const group = await response.json();
+  const artist = group["artist-credit"]?.map((entry) => entry.name).join(", ") || "";
+  const release =
+    (group.releases || []).find((candidate) => isVinylRelease(candidate)) ||
+    (group.releases || [])[0];
+  const fallback = {
+    id: `mb-release-group-${releaseGroupId}`,
+    artist,
+    additionalArtists: joinArtists(splitArtistCredit(artist)),
+    title: group.title || "",
+    year: group["first-release-date"]?.slice(0, 4) || "",
+    releaseDate: group["first-release-date"] || "",
+    genre: pickGenre(group.genres, group.tags),
+    releaseGroupId,
+    source: "MusicBrainz",
+    ...extractStreamingUrls(group.relations),
+  };
+
+  if (release?.id) {
+    try {
+      const releaseDetails = await fetchReleaseDetails(release.id, options);
+      return {
+        ...fallback,
+        ...releaseDetails,
+        id: `mb-release-${release.id}`,
+        mbid: release.id,
+        releaseGroupId,
+        source: "MusicBrainz",
+      };
+    } catch {
+      // Keep release-group metadata if the release-level request is unavailable.
+    }
+  }
+
+  try {
+    const coverResponse = await fetchWithTimeout(
+      `https://coverartarchive.org/release-group/${releaseGroupId}`,
+      {},
+      4500,
+    );
+    if (coverResponse.ok) {
+      const cover = await coverResponse.json();
+      const artworkOptions = normalizeArtworkImages(cover.images || []);
+      const front = cover.images?.find((image) => image.front) || cover.images?.[0];
+      fallback.artworkOptions = artworkOptions;
+      fallback.referenceArtwork = front?.thumbnails?.large || front?.image || "";
+    }
+  } catch {
+    // Artwork is optional.
+  }
+
+  return Object.fromEntries(
+    Object.entries(fallback).filter(([, value]) =>
+      Array.isArray(value) ? value.length : Boolean(value),
+    ),
+  );
+}
+
+async function lookupByAlbumUrl(value = "") {
+  const parsed = parseAlbumLookupUrl(value);
+  if (!parsed) return null;
+
+  let result = {};
+  if (parsed.type === "discogs-release") {
+    result = await fetchDiscogsReleaseDetails(
+      parsed.id,
+      { id: parsed.id, discogsUrl: parsed.url },
+      { resolveStreaming: true },
+    );
+  }
+  if (parsed.type === "discogs-master") {
+    result = await fetchDiscogsMasterDetails(
+      parsed.id,
+      { id: parsed.id, discogsUrl: parsed.url },
+      { resolveStreaming: true },
+    );
+  }
+  if (parsed.type === "musicbrainz-release") {
+    result = await fetchReleaseDetails(parsed.id, { resolveStreaming: true });
+  }
+  if (parsed.type === "musicbrainz-release-group") {
+    result = await fetchReleaseGroupDetails(parsed.id, { resolveStreaming: true });
+  }
+  if (parsed.type === "apple-music-album") {
+    result = await fetchAppleMusicAlbumDetails(parsed.url);
+  }
+  if (parsed.type === "spotify-album") {
+    result = await fetchSpotifyAlbumPageDetails(parsed.url);
+  }
+
+  if (!result || !Object.keys(result).length) {
+    throw new Error("I could not read album information from that link.");
+  }
+
+  const sourceSuffix = /from pasted link/i.test(result.disambiguation || "")
+    ? result.disambiguation
+    : "Matched from pasted link";
+
+  return {
+    ...result,
+    id: result.id || `${parsed.type}-${parsed.id}`,
+    lookupUrl: parsed.url,
+    score: result.score || 100,
+    disambiguation: sourceSuffix,
+    referenceArtwork:
+      result.referenceArtwork ||
+      result.artworkOptions?.find((option) => option.isFront)?.url ||
+      "",
+    spotifyUrl: result.spotifyUrl || (parsed.type === "spotify-album" ? parsed.url : ""),
+    appleMusicUrl: result.appleMusicUrl || (parsed.type === "apple-music-album" ? parsed.url : ""),
+  };
 }
 
 function quoteMusicBrainz(value = "") {
@@ -1557,6 +1953,10 @@ function matchPriority(record, form, fallbackTargets = []) {
 }
 
 async function lookupReleases(form) {
+  if (form.lookupUrl?.trim()) {
+    return [await lookupByAlbumUrl(form.lookupUrl)];
+  }
+
   const queries = buildLookupQueries(form);
   const barcode = cleanBarcode(form.scannedBarcode || "");
   if (!queries.length && !barcode && !form.searchArtist && !form.searchTitle && !form.artist && !form.title) return [];
@@ -2069,7 +2469,9 @@ export default function App() {
     setLookupState({
       recordId: record.id,
       loading: true,
-      phase: record.scannedBarcode
+      phase: record.lookupUrl?.trim()
+        ? "Reading album page link"
+        : record.scannedBarcode
         ? "Reading barcode and searching Discogs + MusicBrainz"
         : "Searching Discogs + MusicBrainz",
       error: "",
@@ -2705,6 +3107,14 @@ function ClueForm({ record, onChange, onIdentify, onScanUploaded, isLoading }) {
             value={record.searchTitle || ""}
             onChange={(event) => onChange({ searchTitle: event.target.value })}
             placeholder="Example: Middle of Nowhere"
+          />
+        </label>
+        <label className="full-span">
+          <span>Album page URL</span>
+          <input
+            value={record.lookupUrl || ""}
+            onChange={(event) => onChange({ lookupUrl: event.target.value })}
+            placeholder="Paste Discogs, MusicBrainz, Apple Music, or Spotify album link"
           />
         </label>
       </div>
