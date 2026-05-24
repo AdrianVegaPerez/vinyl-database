@@ -788,8 +788,9 @@ function barcodeLookupVariants(value = "") {
   if (digits.length === 11) {
     variants.add(`${digits}${upcCheckDigit(digits)}`);
   }
-  if (digits.length === 12 && digits.startsWith("0")) {
-    variants.add(digits.slice(1));
+  if (digits.length === 12) {
+    variants.add(digits.slice(0, -1));
+    if (digits.startsWith("0")) variants.add(digits.slice(1));
   }
   if (digits.length === 13 && digits.startsWith("0")) {
     variants.add(digits.slice(1));
@@ -1124,6 +1125,36 @@ function parseDurationSeconds(value = "") {
   return parts.reduce((total, part) => total * 60 + part, 0);
 }
 
+function titlesAreSimilar(first = "", second = "") {
+  const a = normalizeComparable(first);
+  const b = normalizeComparable(second);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+
+  const aTokens = searchTokens(a);
+  const bTokens = searchTokens(b);
+  const smaller = aTokens.length <= bTokens.length ? aTokens : bTokens;
+  const larger = aTokens.length > bTokens.length ? aTokens : bTokens;
+  return smaller.length > 0 && smaller.every((token) =>
+    larger.some((targetToken) => fuzzyTokenMatch(token, targetToken)),
+  );
+}
+
+function mergeTracklists(primaryTracks = [], enrichmentTracks = []) {
+  if (!primaryTracks.length) return enrichmentTracks;
+  if (!enrichmentTracks.length) return primaryTracks;
+
+  const enrichmentByTitle = new Map(
+    enrichmentTracks.map((track) => [normalizeComparable(track.title), track]),
+  );
+
+  return primaryTracks.map((track) => {
+    if (track.length) return track;
+    const enrichment = enrichmentByTitle.get(normalizeComparable(track.title));
+    return enrichment?.length ? { ...track, length: enrichment.length } : track;
+  });
+}
+
 function formatSeconds(totalSeconds = 0) {
   if (!totalSeconds) return "";
   const minutes = Math.floor(totalSeconds / 60);
@@ -1321,6 +1352,36 @@ async function searchDiscogs(form) {
   );
 }
 
+function enrichPrimaryMatch(primary, enrichment) {
+  if (!enrichment) return primary;
+
+  const tracklist = mergeTracklists(primary.tracklist || [], enrichment.tracklist || []);
+  const source =
+    primary.source && enrichment.source && primary.source !== enrichment.source
+      ? `${primary.source} + ${enrichment.source}`
+      : primary.source || enrichment.source || "";
+
+  return {
+    ...primary,
+    mbid: primary.mbid || enrichment.mbid || "",
+    releaseGroupId: primary.releaseGroupId || enrichment.releaseGroupId || "",
+    year: primary.year || enrichment.year,
+    releaseDate: primary.releaseDate || enrichment.releaseDate,
+    genre: primary.genre || enrichment.genre,
+    length: primary.length || enrichment.length,
+    country: primary.country || enrichment.country,
+    releaseStatus: primary.releaseStatus || enrichment.releaseStatus,
+    trackCount: tracklist.length ? String(tracklist.length) : primary.trackCount || enrichment.trackCount,
+    tracklist,
+    spotifyUrl: primary.spotifyUrl || enrichment.spotifyUrl,
+    appleMusicUrl: primary.appleMusicUrl || enrichment.appleMusicUrl,
+    referenceArtwork: primary.referenceArtwork || enrichment.referenceArtwork,
+    artworkOptions: mergeArtworkOptions(primary.artworkOptions || [], enrichment.artworkOptions || []),
+    additionalArtists: primary.additionalArtists || enrichment.additionalArtists,
+    source,
+  };
+}
+
 async function searchUpcItemDb(barcode) {
   const variants = barcodeLookupVariants(barcode);
   if (!variants.length) return [];
@@ -1419,7 +1480,7 @@ function matchPriority(record, form, fallbackTargets = []) {
     priority -= 160;
   }
   if (isVinylRelease(record)) priority += 120;
-  if (record.source === "Discogs") priority += 180;
+  if (/Discogs/i.test(record.source || "")) priority += 180;
   if (record.source === "UPCItemDB") priority += 80;
 
   return priority;
@@ -1430,14 +1491,30 @@ async function lookupReleases(form) {
   const barcode = cleanBarcode(form.scannedBarcode || "");
   if (!queries.length && !barcode && !form.searchArtist && !form.searchTitle && !form.artist && !form.title) return [];
 
-  const discogsMatches = await searchDiscogs(form);
+  let discogsMatches = await searchDiscogs(form);
   const barcodeFallbacks = barcode ? await searchUpcItemDb(form.scannedBarcode || barcode) : [];
+  if (!discogsMatches.length && barcodeFallbacks.length) {
+    const fallbackDiscogsMatches = await Promise.all(
+      barcodeFallbacks.map((fallback) =>
+        searchDiscogs({
+          ...fallback,
+          searchArtist: fallback.artist,
+          searchTitle: fallback.title,
+          scannedBarcode: form.scannedBarcode || fallback.scannedBarcode,
+        }),
+      ),
+    );
+    discogsMatches = uniqueBy(
+      fallbackDiscogsMatches.flat(),
+      (result) => result.discogsId || result.id,
+    );
+  }
   const fallbackTargets = [...discogsMatches, ...barcodeFallbacks];
   const fallbackQueries = fallbackTargets.flatMap((match) =>
     buildLookupQueries({
       searchArtist: match.artist,
       searchTitle: match.title,
-    }).slice(0, 3),
+    }).slice(0, 7),
   );
   const allQueries = Array.from(
     new Set(fallbackTargets.length ? [...queries.slice(0, 4), ...fallbackQueries] : queries),
@@ -1481,6 +1558,13 @@ async function lookupReleases(form) {
     })
     .slice(0, 20);
 
+  const enrichedDiscogsMatches = discogsMatches.map((match) => {
+    const enrichment = results.find((result) =>
+      titlesAreSimilar(result.title, match.title),
+    );
+    return enrichPrimaryMatch(match, enrichment);
+  });
+
   const enrichedFallbacks = barcodeFallbacks.map((fallback) => {
     const fallbackTitle = normalizeComparable(fallback.title);
     const fallbackArtists = splitArtistCredit(fallback.artist).map(normalizeComparable);
@@ -1513,7 +1597,7 @@ async function lookupReleases(form) {
       : fallback;
   });
 
-  return uniqueBy([...discogsMatches, ...enrichedFallbacks, ...results], (result) =>
+  return uniqueBy([...enrichedDiscogsMatches, ...enrichedFallbacks, ...results], (result) =>
     result.discogsId ? `discogs-${result.discogsId}` : result.mbid ? `mb-${result.mbid}` : result.id,
   )
     .filter((result) => result.title)
