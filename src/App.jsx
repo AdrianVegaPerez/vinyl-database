@@ -531,6 +531,12 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   }
 }
 
+function discogsApiUrl(path, params = new URLSearchParams()) {
+  const searchParams = new URLSearchParams(params);
+  searchParams.set("path", path.replace(/^\/+/, ""));
+  return `${DISCOGS_API_BASE}?${searchParams.toString()}`;
+}
+
 function formatLabels(labelInfo = []) {
   return uniqueJoin(labelInfo.map((entry) => entry.label?.name));
 }
@@ -1224,7 +1230,7 @@ async function fetchDiscogsReleaseDetails(discogsId, searchResult = {}) {
   if (!discogsId) return {};
 
   const response = await fetchWithTimeout(
-    `${DISCOGS_API_BASE}/releases/${discogsId}`,
+    discogsApiUrl(`releases/${discogsId}`),
     {},
     8000,
   );
@@ -1318,7 +1324,7 @@ async function searchDiscogs(form) {
     });
     try {
       const response = await fetchWithTimeout(
-        `${DISCOGS_API_BASE}/database/search?${params.toString()}`,
+        discogsApiUrl("database/search", params),
         {},
         7000,
       );

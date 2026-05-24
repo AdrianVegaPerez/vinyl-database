@@ -13,7 +13,15 @@ export default defineConfig({
       "/api/discogs": {
         target: "https://api.discogs.com",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/discogs/, ""),
+        headers: {
+          "User-Agent": "VinylDatabase/0.1 +https://vinyl-database-zeta.vercel.app",
+        },
+        rewrite: (path) => {
+          const url = new URL(path, "http://localhost");
+          const discogsPath = url.searchParams.get("path") || "";
+          url.searchParams.delete("path");
+          return `/${discogsPath.replace(/^\/+/, "")}${url.search}`;
+        },
       },
     },
   },

@@ -9,11 +9,15 @@ export default async function handler(request, response) {
     return;
   }
 
-  const pathParts = Array.isArray(request.query.path)
-    ? request.query.path
-    : [request.query.path].filter(Boolean);
-  const path = pathParts.map(encodeURIComponent).join("/");
   const incomingUrl = new URL(request.url, `https://${request.headers.host}`);
+  const path = String(request.query.path || "").replace(/^\/+/, "");
+  incomingUrl.searchParams.delete("path");
+
+  if (!path) {
+    response.status(400).json({ error: "Missing Discogs API path" });
+    return;
+  }
+
   const targetUrl = `${DISCOGS_API_ROOT}/${path}${incomingUrl.search}`;
 
   try {
