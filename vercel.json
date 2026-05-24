@@ -5,10 +5,6 @@
       "destination": "https://api.upcitemdb.com/prod/trial/:path*"
     },
     {
-      "source": "/api/discogs/:path*",
-      "destination": "https://api.discogs.com/:path*"
-    },
-    {
       "source": "/(.*)",
       "destination": "/"
     }
