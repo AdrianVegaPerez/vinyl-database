@@ -553,6 +553,12 @@ main {
   margin: 0;
 }
 
+.artwork-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
 .artwork-compare img,
 .empty-artwork {
   width: 100%;
@@ -561,6 +567,27 @@ main {
   object-fit: cover;
   background: #eee6da;
   box-shadow: inset 0 0 0 1px rgba(29, 26, 23, 0.08);
+}
+
+.artwork-tools {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.artwork-tools button {
+  display: inline-grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(29, 26, 23, 0.12);
+  border-radius: 8px;
+  color: #342d28;
+  background: rgba(255, 250, 242, 0.92);
+  box-shadow: 0 10px 20px rgba(29, 26, 23, 0.12);
+  backdrop-filter: blur(8px);
 }
 
 .empty-artwork {
@@ -1655,6 +1682,88 @@ main {
   backdrop-filter: blur(8px);
 }
 
+.database-table-wrap {
+  overflow: auto;
+  border: 1px solid rgba(29, 26, 23, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 18px 42px rgba(54, 43, 34, 0.08);
+}
+
+.database-table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: collapse;
+}
+
+.database-table th,
+.database-table td {
+  padding: 11px 12px;
+  border-bottom: 1px solid rgba(29, 26, 23, 0.08);
+  color: #2b2622;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.database-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: #6f655c;
+  background: #fffaf3;
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.database-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.database-table strong,
+.database-table small {
+  display: block;
+}
+
+.database-table small {
+  margin-top: 3px;
+  color: #756a60;
+}
+
+.database-cover {
+  width: 54px;
+  height: 54px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #ebe1d5;
+}
+
+.database-cover img,
+.database-cover .album-art-placeholder {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.database-links,
+.record-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.database-links a {
+  color: #b6422e;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.record-action-row .icon-button {
+  width: 34px;
+  height: 34px;
+}
+
 .icon-button.favorite.active,
 .secondary-action.favorite.active {
   color: #b6422e;
@@ -2237,6 +2346,7 @@ main {
 :root[data-theme="dark"] .collection-filter-panel,
 :root[data-theme="dark"] .collection-section-heading,
 :root[data-theme="dark"] .album-card,
+:root[data-theme="dark"] .database-table-wrap,
 :root[data-theme="dark"] .streaming-panel,
 :root[data-theme="dark"] .detail-modal {
   border-color: rgba(245, 238, 229, 0.12);
@@ -2279,6 +2389,7 @@ main {
 
 :root[data-theme="dark"] .secondary-action,
 :root[data-theme="dark"] .icon-button,
+:root[data-theme="dark"] .artwork-tools button,
 :root[data-theme="dark"] .segmented-control,
 :root[data-theme="dark"] .columns-control,
 :root[data-theme="dark"] .import-mode-control,
@@ -2324,7 +2435,9 @@ main {
 :root[data-theme="dark"] .match-card span,
 :root[data-theme="dark"] .match-card small,
 :root[data-theme="dark"] .wishlist-meta span,
-:root[data-theme="dark"] .wishlist-meta p {
+:root[data-theme="dark"] .wishlist-meta p,
+:root[data-theme="dark"] .database-table th,
+:root[data-theme="dark"] .database-table small {
   color: #b9aa9b;
 }
 
@@ -2339,7 +2452,8 @@ main {
 :root[data-theme="dark"] .detail-meta dd,
 :root[data-theme="dark"] .collection-section-heading span,
 :root[data-theme="dark"] .panel-heading strong,
-:root[data-theme="dark"] .panel-title strong {
+:root[data-theme="dark"] .panel-title strong,
+:root[data-theme="dark"] .database-table td {
   color: #f7efe5;
 }
 
@@ -2350,4 +2464,13 @@ main {
 :root[data-theme="dark"] .empty-artwork {
   color: #b8a99b;
   background: #2b241f;
+}
+
+:root[data-theme="dark"] .database-table th {
+  background: #241d18;
+}
+
+:root[data-theme="dark"] .database-table th,
+:root[data-theme="dark"] .database-table td {
+  border-color: rgba(245, 238, 229, 0.1);
 }

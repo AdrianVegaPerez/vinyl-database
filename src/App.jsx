@@ -30,6 +30,9 @@ import {
   Music2,
   Pencil,
   Plus,
+  Database,
+  RotateCcw,
+  RotateCw,
   Save,
   ScanBarcode,
   Search,
@@ -56,6 +59,7 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const SUPABASE_LIBRARY_ID = import.meta.env.VITE_SUPABASE_LIBRARY_ID || "default";
 const CLOUD_STORAGE_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+const DISCOGS_API_BASE = "/api/discogs";
 const supabase = CLOUD_STORAGE_ENABLED
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
@@ -81,6 +85,8 @@ const EMPTY_FORM = {
   favorite: false,
   wantsBetterArtwork: false,
   source: "",
+  discogsId: "",
+  discogsUrl: "",
   releaseGroupId: "",
   spotifyUrl: "",
   appleMusicUrl: "",
@@ -323,10 +329,23 @@ async function createCoverDataUrl(file) {
   }
 }
 
-async function decodeBarcodeFile(file) {
-  const dataUrl = await readFileAsDataUrl(file);
+async function rotateImageDataUrl(dataUrl, degrees = 90) {
   const image = await loadImage(dataUrl);
+  const normalizedDegrees = ((degrees % 360) + 360) % 360;
+  const quarterTurn = normalizedDegrees === 90 || normalizedDegrees === 270;
+  const canvas = document.createElement("canvas");
+  canvas.width = quarterTurn ? image.height : image.width;
+  canvas.height = quarterTurn ? image.width : image.height;
+  const context = canvas.getContext("2d");
 
+  context.translate(canvas.width / 2, canvas.height / 2);
+  context.rotate((normalizedDegrees * Math.PI) / 180);
+  context.drawImage(image, -image.width / 2, -image.height / 2);
+
+  return canvas.toDataURL("image/jpeg", COVER_JPEG_QUALITY);
+}
+
+async function decodeBarcodeImage(image) {
   if ("BarcodeDetector" in window) {
     try {
       const supportedFormats =
@@ -367,6 +386,16 @@ async function decodeBarcodeFile(file) {
   } catch {
     throw new Error("No barcode found. Try a sharper, closer photo of just the barcode.");
   }
+}
+
+async function decodeBarcodeDataUrl(dataUrl) {
+  const image = await loadImage(dataUrl);
+  return decodeBarcodeImage(image);
+}
+
+async function decodeBarcodeFile(file) {
+  const dataUrl = await readFileAsDataUrl(file);
+  return decodeBarcodeDataUrl(dataUrl);
 }
 
 function normalizeRelease(release) {
@@ -738,6 +767,52 @@ function cleanBarcode(value = "") {
   return String(value).replace(/\D/g, "");
 }
 
+function upcCheckDigit(elevenDigits = "") {
+  if (!/^\d{11}$/.test(elevenDigits)) return "";
+  const sum = elevenDigits
+    .split("")
+    .reduce((total, digit, index) => total + Number(digit) * (index % 2 === 0 ? 3 : 1), 0);
+  return String((10 - (sum % 10)) % 10);
+}
+
+function barcodeLookupVariants(value = "") {
+  const digits = cleanBarcode(value);
+  if (!digits) return [];
+
+  const variants = new Set([digits]);
+  if (digits.length === 10) {
+    const upcBase = `0${digits}`;
+    variants.add(upcBase);
+    variants.add(`${upcBase}${upcCheckDigit(upcBase)}`);
+  }
+  if (digits.length === 11) {
+    variants.add(`${digits}${upcCheckDigit(digits)}`);
+  }
+  if (digits.length === 12 && digits.startsWith("0")) {
+    variants.add(digits.slice(1));
+  }
+  if (digits.length === 13 && digits.startsWith("0")) {
+    variants.add(digits.slice(1));
+  }
+
+  return Array.from(variants).filter((variant) => variant.length >= 8);
+}
+
+function catalogLookupVariants(value = "") {
+  const raw = String(value).replace(/\s+/g, " ").trim();
+  const digits = cleanBarcode(value);
+  const variants = new Set();
+
+  if (raw) variants.add(raw);
+  if (digits.length >= 5) variants.add(digits);
+  if (digits.length === 10) {
+    variants.add(`${digits.slice(0, 4)}-${digits.slice(4, 9)}-${digits.slice(9)}`);
+    variants.add(`9 ${digits.slice(4, 9)}-${digits.slice(9)}`);
+  }
+
+  return Array.from(variants).filter((variant) => variant.length >= 5);
+}
+
 function isVinylRelease(release) {
   return /vinyl|12\"|10\"|7\"|lp/i.test(
     [release.format, release.disambiguation].filter(Boolean).join(" "),
@@ -1030,30 +1105,258 @@ function normalizeUpcItem(item, barcode) {
   };
 }
 
+function parseDiscogsTitle(title = "") {
+  const parts = String(title).split(/\s+-\s+/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    return {
+      artist: parts[0],
+      title: parts.slice(1).join(" - "),
+    };
+  }
+  return { artist: "", title: String(title).trim() };
+}
+
+function parseDurationSeconds(value = "") {
+  const parts = String(value)
+    .split(":")
+    .map((part) => Number(part));
+  if (!parts.length || parts.some(Number.isNaN)) return 0;
+  return parts.reduce((total, part) => total * 60 + part, 0);
+}
+
+function formatSeconds(totalSeconds = 0) {
+  if (!totalSeconds) return "";
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function normalizeDiscogsArtwork(images = [], result = {}) {
+  const imageOptions = images
+    .map((image, index) => ({
+      id: `discogs-${image.resource_url || image.uri || index}`,
+      url: image.uri || image.resource_url || image.uri150,
+      fullUrl: image.resource_url || image.uri || image.uri150,
+      label: image.type || `Artwork ${index + 1}`,
+      isFront: index === 0 || /primary|front/i.test(image.type || ""),
+    }))
+    .filter((image) => image.url);
+  const searchImage = result.cover_image || result.thumb;
+
+  return mergeArtworkOptions(
+    imageOptions,
+    searchImage
+      ? [{
+          id: `discogs-search-${result.id}`,
+          url: searchImage,
+          fullUrl: searchImage,
+          label: "Discogs image",
+          isFront: true,
+        }]
+      : [],
+  );
+}
+
+function normalizeDiscogsSearchResult(result) {
+  const parsed = parseDiscogsTitle(result.title || "");
+  const artworkOptions = normalizeDiscogsArtwork([], result);
+  return {
+    id: `discogs-${result.id}`,
+    discogsId: String(result.id || ""),
+    discogsUrl: result.uri ? `https://www.discogs.com${result.uri}` : "",
+    mbid: "",
+    artist: parsed.artist,
+    additionalArtists: joinArtists(splitArtistCredit(parsed.artist)),
+    title: parsed.title || result.title || "",
+    year: result.year ? String(result.year) : "",
+    releaseDate: result.year ? String(result.year) : "",
+    genre: joinGenres([...(result.genre || []), ...(result.style || [])]),
+    label: uniqueJoin(result.label || []),
+    length: "",
+    disambiguation: "Matched by Discogs",
+    country: result.country || "",
+    releaseStatus: "",
+    format: uniqueJoin(result.format || []),
+    trackCount: "",
+    source: "Discogs",
+    releaseGroupId: "",
+    score: 120,
+    scannedBarcode: Array.isArray(result.barcode) ? result.barcode[0] || "" : "",
+    referenceArtwork: artworkOptions[0]?.url || "",
+    artworkOptions,
+    notes: "",
+    catalogNumber: result.catno || "",
+  };
+}
+
+async function fetchDiscogsReleaseDetails(discogsId, searchResult = {}) {
+  if (!discogsId) return {};
+
+  const response = await fetchWithTimeout(
+    `${DISCOGS_API_BASE}/releases/${discogsId}`,
+    {},
+    8000,
+  );
+  if (!response.ok) return {};
+
+  const details = await response.json();
+  const tracklist = (details.tracklist || [])
+    .filter((track) => track.type_ === "track")
+    .map((track, index) => ({
+      id: `discogs-${discogsId}-${track.position || index}`,
+      position: track.position || String(index + 1),
+      title: track.title || "Untitled track",
+      length: track.duration || "",
+      medium: 1,
+    }));
+  const length = formatSeconds(
+    tracklist.reduce((total, track) => total + parseDurationSeconds(track.length), 0),
+  );
+  const artist = uniqueJoin((details.artists || []).map((artistEntry) => artistEntry.name));
+  const artworkOptions = normalizeDiscogsArtwork(details.images || [], searchResult);
+  const urls = Array.isArray(details.urls) ? details.urls : [];
+
+  const patch = {
+    artist,
+    additionalArtists: joinArtists(splitArtistCredit(artist)),
+    title: details.title || "",
+    year: details.year ? String(details.year) : "",
+    releaseDate: details.released || (details.year ? String(details.year) : ""),
+    genre: joinGenres([...(details.genres || []), ...(details.styles || [])]),
+    label: uniqueJoin((details.labels || []).map((label) => label.name)),
+    length,
+    country: details.country || "",
+    format: uniqueJoin((details.formats || []).map((format) => format.name)),
+    trackCount: tracklist.length ? String(tracklist.length) : "",
+    tracklist,
+    source: "Discogs",
+    discogsId: String(details.id || discogsId),
+    discogsUrl: details.uri || searchResult.discogsUrl || "",
+    spotifyUrl: urls.find((url) => /open\.spotify\.com|spotify\.com\/album/i.test(url)) || "",
+    appleMusicUrl: urls.find((url) => /music\.apple\.com|itunes\.apple\.com/i.test(url)) || "",
+    artworkOptions,
+    referenceArtwork: artworkOptions[0]?.url || "",
+    catalogNumber: details.labels?.map((label) => label.catno).filter(Boolean).join(", ") || "",
+  };
+
+  if (!patch.appleMusicUrl) {
+    patch.appleMusicUrl = await resolveAppleMusicAlbumUrl(patch);
+  }
+  if (!patch.spotifyUrl && patch.appleMusicUrl) {
+    const linked = await resolveLinkedStreamingUrls(patch.appleMusicUrl);
+    if (linked.spotifyUrl) patch.spotifyUrl = linked.spotifyUrl;
+  }
+
+  return Object.fromEntries(
+    Object.entries(patch).filter(([, value]) =>
+      Array.isArray(value) ? value.length : Boolean(value),
+    ),
+  );
+}
+
+async function searchDiscogs(form) {
+  const artist = form.searchArtist || form.artist || "";
+  const title = form.searchTitle || form.title || "";
+  const barcode = form.scannedBarcode || "";
+  const searches = [];
+
+  barcodeLookupVariants(barcode).forEach((variant) => {
+    searches.push({ barcode: variant });
+  });
+  catalogLookupVariants(barcode).forEach((variant) => {
+    searches.push({ catno: variant });
+  });
+  if (artist || title) {
+    searches.push({
+      ...(artist ? { artist } : {}),
+      ...(title ? { release_title: title } : {}),
+    });
+  }
+  if (title) searches.push({ q: title });
+  if (artist) searches.push({ q: artist });
+
+  const uniqueSearches = uniqueBy(searches, (search) => JSON.stringify(search)).slice(0, 8);
+  const results = new Map();
+
+  for (const search of uniqueSearches) {
+    const params = new URLSearchParams({
+      type: "release",
+      format: "Vinyl",
+      per_page: "10",
+      ...search,
+    });
+    try {
+      const response = await fetchWithTimeout(
+        `${DISCOGS_API_BASE}/database/search?${params.toString()}`,
+        {},
+        7000,
+      );
+      if (!response.ok) continue;
+      const data = await response.json();
+      (data.results || []).forEach((result) => {
+        if (!results.has(result.id)) {
+          results.set(result.id, normalizeDiscogsSearchResult(result));
+        }
+      });
+    } catch {
+      // Discogs is helpful but optional; MusicBrainz can still provide suggestions.
+    }
+  }
+
+  const candidates = Array.from(results.values()).slice(0, 10);
+  return Promise.all(
+    candidates.map(async (candidate) => {
+      try {
+        const details = await fetchDiscogsReleaseDetails(candidate.discogsId, candidate);
+        return {
+          ...candidate,
+          ...details,
+          artworkOptions: mergeArtworkOptions(details.artworkOptions || [], candidate.artworkOptions || []),
+          referenceArtwork: details.referenceArtwork || candidate.referenceArtwork,
+        };
+      } catch {
+        return candidate;
+      }
+    }),
+  );
+}
+
 async function searchUpcItemDb(barcode) {
-  const clean = cleanBarcode(barcode);
-  if (!clean) return [];
+  const variants = barcodeLookupVariants(barcode);
+  if (!variants.length) return [];
 
-  const params = new URLSearchParams({ upc: clean });
-  const response = await fetchWithTimeout(`/api/upcitemdb/lookup?${params.toString()}`);
-  if (!response.ok) return [];
+  const items = new Map();
+  for (const variant of variants.slice(0, 4)) {
+    const params = new URLSearchParams({ upc: variant });
+    try {
+      const response = await fetchWithTimeout(`/api/upcitemdb/lookup?${params.toString()}`);
+      if (!response.ok) continue;
+      const data = await response.json();
+      (data.items || []).forEach((item) => {
+        items.set(item.ean || item.upc || item.title, normalizeUpcItem(item, variant));
+      });
+    } catch {
+      // Continue trying other UPC variants.
+    }
+  }
 
-  const data = await response.json();
-  return (data.items || []).map((item) => normalizeUpcItem(item, clean));
+  return Array.from(items.values());
 }
 
 function buildLookupQueries(form) {
   const artist = form.searchArtist || form.artist || "";
   const title = form.searchTitle || form.title || "";
-  const barcode = cleanBarcode(form.scannedBarcode || "");
+  const barcode = form.scannedBarcode || "";
   const general = quoteMusicBrainz([artist, title].filter(Boolean).join(" "));
   const artistQuery = fieldQuery("artist", artist);
   const titleQuery = fieldQuery("release", title);
-  const barcodeQuery = fieldQuery("barcode", barcode);
+  const barcodeQueries = barcodeLookupVariants(barcode).map((variant) => fieldQuery("barcode", variant));
+  const catalogQueries = catalogLookupVariants(barcode).map((variant) => fieldQuery("catno", variant));
   const vinylQuery = fieldQuery("format", "Vinyl");
   const combinedQuery = artistQuery && titleQuery ? `${artistQuery} AND ${titleQuery}` : "";
   const queries = [
-    barcodeQuery,
+    ...barcodeQueries,
+    ...catalogQueries,
     combinedQuery && vinylQuery ? `${combinedQuery} AND ${vinylQuery}` : "",
     combinedQuery,
     artistQuery && vinylQuery ? `${artistQuery} AND ${vinylQuery}` : "",
@@ -1116,6 +1419,7 @@ function matchPriority(record, form, fallbackTargets = []) {
     priority -= 160;
   }
   if (isVinylRelease(record)) priority += 120;
+  if (record.source === "Discogs") priority += 180;
   if (record.source === "UPCItemDB") priority += 80;
 
   return priority;
@@ -1124,17 +1428,19 @@ function matchPriority(record, form, fallbackTargets = []) {
 async function lookupReleases(form) {
   const queries = buildLookupQueries(form);
   const barcode = cleanBarcode(form.scannedBarcode || "");
-  if (!queries.length && !barcode) return [];
+  if (!queries.length && !barcode && !form.searchArtist && !form.searchTitle && !form.artist && !form.title) return [];
 
-  let barcodeFallbacks = barcode ? await searchUpcItemDb(barcode) : [];
-  const fallbackQueries = barcodeFallbacks.flatMap((match) =>
+  const discogsMatches = await searchDiscogs(form);
+  const barcodeFallbacks = barcode ? await searchUpcItemDb(form.scannedBarcode || barcode) : [];
+  const fallbackTargets = [...discogsMatches, ...barcodeFallbacks];
+  const fallbackQueries = fallbackTargets.flatMap((match) =>
     buildLookupQueries({
       searchArtist: match.artist,
       searchTitle: match.title,
     }).slice(0, 3),
   );
   const allQueries = Array.from(
-    new Set(barcodeFallbacks.length ? [fieldQuery("barcode", barcode), ...fallbackQueries] : queries),
+    new Set(fallbackTargets.length ? [...queries.slice(0, 4), ...fallbackQueries] : queries),
   ).filter(Boolean);
   const releaseMap = new Map();
   for (const query of allQueries) {
@@ -1154,9 +1460,9 @@ async function lookupReleases(form) {
   const releaseCandidates = Array.from(releaseMap.values())
     .map(normalizeRelease)
     .sort((a, b) => {
-      return matchPriority(b, form, barcodeFallbacks) - matchPriority(a, form, barcodeFallbacks);
+      return matchPriority(b, form, fallbackTargets) - matchPriority(a, form, fallbackTargets);
     })
-    .slice(0, barcodeFallbacks.length ? 6 : 12);
+    .slice(0, fallbackTargets.length ? 8 : 12);
 
   const hydrated = await Promise.all(
     releaseCandidates.map(async (normalized) => {
@@ -1171,7 +1477,7 @@ async function lookupReleases(form) {
 
   const results = hydrated
     .sort((a, b) => {
-      return matchPriority(b, form, barcodeFallbacks) - matchPriority(a, form, barcodeFallbacks);
+      return matchPriority(b, form, fallbackTargets) - matchPriority(a, form, fallbackTargets);
     })
     .slice(0, 20);
 
@@ -1207,10 +1513,12 @@ async function lookupReleases(form) {
       : fallback;
   });
 
-  return [...enrichedFallbacks, ...results]
+  return uniqueBy([...discogsMatches, ...enrichedFallbacks, ...results], (result) =>
+    result.discogsId ? `discogs-${result.discogsId}` : result.mbid ? `mb-${result.mbid}` : result.id,
+  )
     .filter((result) => result.title)
     .sort((a, b) => {
-      return matchPriority(b, form, barcodeFallbacks) - matchPriority(a, form, barcodeFallbacks);
+      return matchPriority(b, form, fallbackTargets) - matchPriority(a, form, fallbackTargets);
     })
     .slice(0, 20);
 }
@@ -1596,8 +1904,8 @@ export default function App() {
       recordId: record.id,
       loading: true,
       phase: record.scannedBarcode
-        ? "Reading barcode and searching album databases"
-        : "Searching MusicBrainz",
+        ? "Reading barcode and searching Discogs + MusicBrainz"
+        : "Searching Discogs + MusicBrainz",
       error: "",
       results: [],
     });
@@ -2090,7 +2398,14 @@ function ReviewView({
       </aside>
 
       <section className="review-card">
-        <ArtworkCompare record={record} />
+        <ArtworkCompare
+          record={record}
+          onRotate={async (degrees) => {
+            if (!record.coverDataUrl) return;
+            const coverDataUrl = await rotateImageDataUrl(record.coverDataUrl, degrees);
+            updateRecord(record.id, { coverDataUrl });
+          }}
+        />
         <ArtworkPicker
           record={record}
           onSelect={(url) => updateRecord(record.id, { referenceArtwork: url })}
@@ -2099,6 +2414,15 @@ function ReviewView({
           record={record}
           onChange={(patch) => updateRecord(record.id, patch)}
           onIdentify={(patch = {}) => handleLookup({ ...record, ...patch })}
+          onScanUploaded={async () => {
+            if (!record.coverDataUrl) {
+              throw new Error("No uploaded photo to scan.");
+            }
+            const scannedBarcode = await decodeBarcodeDataUrl(record.coverDataUrl);
+            updateRecord(record.id, { scannedBarcode });
+            handleLookup({ ...record, scannedBarcode });
+            return scannedBarcode;
+          }}
           isLoading={lookupState.loading && lookupState.recordId === record.id}
         />
         <RecordForm
@@ -2140,7 +2464,7 @@ function ReviewView({
   );
 }
 
-function ClueForm({ record, onChange, onIdentify, isLoading }) {
+function ClueForm({ record, onChange, onIdentify, onScanUploaded, isLoading }) {
   const barcodeInputRef = useRef(null);
   const [barcodeScanState, setBarcodeScanState] = useState("");
 
@@ -2158,6 +2482,16 @@ function ClueForm({ record, onChange, onIdentify, isLoading }) {
       setBarcodeScanState(error.message || "Barcode could not be scanned.");
     } finally {
       if (barcodeInputRef.current) barcodeInputRef.current.value = "";
+    }
+  }
+
+  async function handleScanUploaded() {
+    setBarcodeScanState("Scanning current photo...");
+    try {
+      const scannedBarcode = await onScanUploaded();
+      setBarcodeScanState(`Barcode found: ${scannedBarcode}`);
+    } catch (error) {
+      setBarcodeScanState(error.message || "Barcode could not be scanned.");
     }
   }
 
@@ -2217,6 +2551,15 @@ function ClueForm({ record, onChange, onIdentify, isLoading }) {
           Scan Barcode
         </button>
         <button
+          className="secondary-action"
+          type="button"
+          onClick={handleScanUploaded}
+          disabled={!record.coverDataUrl || isLoading}
+        >
+          <ScanBarcode size={18} />
+          Scan Current Photo
+        </button>
+        <button
           className="secondary-action identify-button"
           type="button"
           onClick={onIdentify}
@@ -2230,19 +2573,31 @@ function ClueForm({ record, onChange, onIdentify, isLoading }) {
   );
 }
 
-function ArtworkCompare({ record }) {
+function ArtworkCompare({ record, onRotate }) {
   return (
     <div className="artwork-compare">
       <figure>
-        <FallbackImage
-          sources={[record.coverDataUrl]}
-          alt={`${record.title || "Uploaded"} cover`}
-          placeholder={(
-            <div className="empty-artwork">
-              <Album size={44} strokeWidth={1.4} />
+        <div className="artwork-frame">
+          <FallbackImage
+            sources={[record.coverDataUrl]}
+            alt={`${record.title || "Uploaded"} cover`}
+            placeholder={(
+              <div className="empty-artwork">
+                <Album size={44} strokeWidth={1.4} />
+              </div>
+            )}
+          />
+          {record.coverDataUrl ? (
+            <div className="artwork-tools" aria-label="Rotate uploaded photo">
+              <button type="button" onClick={() => onRotate(-90)} title="Rotate left">
+                <RotateCcw size={17} />
+              </button>
+              <button type="button" onClick={() => onRotate(90)} title="Rotate right">
+                <RotateCw size={17} />
+              </button>
             </div>
-          )}
-        />
+          ) : null}
+        </div>
         <figcaption>Uploaded cover</figcaption>
       </figure>
       <figure>
@@ -2504,7 +2859,7 @@ function StreamingLinksPanel({ record, onChange }) {
         </div>
       ) : (
         <p className="exact-link-note">
-          Exact album links appear here when MusicBrainz or Apple Music confirms them.
+          Exact album links appear here when Discogs, MusicBrainz, or Apple Music confirms them.
         </p>
       )}
       <div className="streaming-fields">
@@ -2554,21 +2909,34 @@ function TracklistPreview({ record }) {
 }
 
 function RecordEvidence({ record }) {
-  if (!record.mbid) return null;
+  if (!record.mbid && !record.discogsUrl) return null;
 
   return (
     <div className="evidence-box">
-      <a
-        href={`https://musicbrainz.org/release/${record.mbid}`}
-        target="_blank"
-        rel="noreferrer"
-      >
-        <Disc3 size={16} />
-        MusicBrainz source
-      </a>
+      {record.discogsUrl ? (
+        <a
+          href={record.discogsUrl}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <Database size={16} />
+          Discogs source
+        </a>
+      ) : null}
+      {record.mbid ? (
+        <a
+          href={`https://musicbrainz.org/release/${record.mbid}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <Disc3 size={16} />
+          MusicBrainz source
+        </a>
+      ) : null}
       <span>
         {[
           record.source,
+          record.discogsId ? `Discogs ${record.discogsId}` : "",
           record.mbid ? `Release ${record.mbid}` : "",
           record.releaseGroupId ? `Release group ${record.releaseGroupId}` : "",
         ]
@@ -2830,6 +3198,10 @@ function CollectionView({
   const [detailRecord, setDetailRecord] = useState(null);
   const columnCount = Number(gridColumns);
   const rowCount = Math.max(1, Math.ceil(filteredCollection.length / columnCount));
+  const headingMeta =
+    viewMode === "database"
+      ? `${filteredCollection.length} row${filteredCollection.length === 1 ? "" : "s"}`
+      : `${filteredCollection.length} showing · ${columnCount} columns · ${rowCount} rows`;
 
   if (!collection.length) {
     return (
@@ -2996,9 +3368,7 @@ function CollectionView({
         <div className="collection-section-heading">
           <div>
             <span>Records</span>
-            <strong>
-              {filteredCollection.length} showing · {columnCount} columns · {rowCount} rows
-            </strong>
+            <strong>{headingMeta}</strong>
           </div>
           <div className="collection-view-controls">
             <div className="segmented-control" aria-label="Collection view">
@@ -3018,20 +3388,30 @@ function CollectionView({
                 <TableProperties size={17} />
                 Details
               </button>
-            </div>
-            <label className="columns-control">
-              <Columns3 size={17} />
-              <select
-                value={gridColumns}
-                onChange={(event) => setGridColumns(Number(event.target.value))}
+              <button
+                className={viewMode === "database" ? "active" : ""}
+                type="button"
+                onClick={() => setViewMode("database")}
               >
-                {[2, 3, 4, 5, 6, 7, 8].map((count) => (
-                  <option key={count} value={count}>
-                    {count} columns
-                  </option>
-                ))}
-              </select>
-            </label>
+                <Database size={17} />
+                Database
+              </button>
+            </div>
+            {viewMode !== "database" ? (
+              <label className="columns-control">
+                <Columns3 size={17} />
+                <select
+                  value={gridColumns}
+                  onChange={(event) => setGridColumns(Number(event.target.value))}
+                >
+                  {[2, 3, 4, 5, 6, 7, 8].map((count) => (
+                    <option key={count} value={count}>
+                      {count} columns
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <button
               className="secondary-action"
               type="button"
@@ -3063,7 +3443,115 @@ function CollectionView({
           </div>
         </div>
 
-        {filteredCollection.length ? (
+        {filteredCollection.length && viewMode === "database" ? (
+          <div className="database-table-wrap">
+            <table className="database-table">
+              <thead>
+                <tr>
+                  <th>Cover</th>
+                  <th>Artist</th>
+                  <th>Album</th>
+                  <th>Year</th>
+                  <th>Genres</th>
+                  <th>Label</th>
+                  <th>Length</th>
+                  <th>Source</th>
+                  <th>Links</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredCollection.map((record) => (
+                  <tr key={record.id}>
+                    <td>
+                      <div className="database-cover">
+                        <FallbackImage
+                          sources={[record.referenceArtwork, record.coverDataUrl]}
+                          alt={`${record.title} cover`}
+                        />
+                      </div>
+                    </td>
+                    <td>
+                      <strong>{record.artist || "Unknown artist"}</strong>
+                      {splitArtists(record.additionalArtists).length ? (
+                        <small>{splitArtists(record.additionalArtists).join(", ")}</small>
+                      ) : null}
+                    </td>
+                    <td>{record.title || "Untitled"}</td>
+                    <td>{record.year || "—"}</td>
+                    <td>{splitGenres(record.genre).join(", ") || "—"}</td>
+                    <td>{record.label || "—"}</td>
+                    <td>{record.length || "—"}</td>
+                    <td>{record.acquiredFrom || "—"}</td>
+                    <td>
+                      <div className="database-links">
+                        {spotifyAlbumUrl(record) ? (
+                          <a href={spotifyAlbumUrl(record)} target="_blank" rel="noreferrer">
+                            Spotify
+                          </a>
+                        ) : null}
+                        {appleMusicAlbumUrl(record) ? (
+                          <a href={appleMusicAlbumUrl(record)} target="_blank" rel="noreferrer">
+                            Apple
+                          </a>
+                        ) : null}
+                        {record.discogsUrl ? (
+                          <a href={record.discogsUrl} target="_blank" rel="noreferrer">
+                            Discogs
+                          </a>
+                        ) : null}
+                        {record.mbid ? (
+                          <a href={`https://musicbrainz.org/release/${record.mbid}`} target="_blank" rel="noreferrer">
+                            MusicBrainz
+                          </a>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="record-action-row">
+                        <button
+                          className={record.favorite ? "icon-button favorite active" : "icon-button favorite"}
+                          type="button"
+                          onClick={() => updateRecord(record.id, { favorite: !record.favorite })}
+                          title={record.favorite ? "Remove favorite" : "Favorite record"}
+                          aria-label={record.favorite ? "Remove favorite" : "Favorite record"}
+                        >
+                          <Heart size={17} fill={record.favorite ? "currentColor" : "none"} />
+                        </button>
+                        <button
+                          className="icon-button"
+                          type="button"
+                          onClick={() => moveToReview(record.id)}
+                          title="Edit record"
+                          aria-label="Edit record"
+                        >
+                          <Pencil size={17} />
+                        </button>
+                        <button
+                          className="icon-button"
+                          type="button"
+                          onClick={() => setDetailRecord(record)}
+                          title="Record details"
+                          aria-label="Record details"
+                        >
+                          <Info size={17} />
+                        </button>
+                        <button
+                          className="icon-button danger"
+                          type="button"
+                          onClick={() => removeRecord(record.id)}
+                          title="Delete record"
+                        >
+                          <X size={17} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : filteredCollection.length ? (
           <div
             className={viewMode === "covers" ? "collection-grid cover-only" : "collection-grid details-grid"}
             style={{ "--columns": columnCount }}
@@ -3134,6 +3622,16 @@ function CollectionView({
                         >
                           <Music2 size={14} />
                           Apple
+                        </a>
+                      ) : null}
+                      {record.discogsUrl ? (
+                        <a
+                          href={record.discogsUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <Database size={14} />
+                          Discogs
                         </a>
                       ) : null}
                       {record.mbid ? (
@@ -3295,6 +3793,12 @@ function RecordDetailModal({ record, onClose, onEdit, onFavorite, onDelete }) {
               <a href={appleUrl} target="_blank" rel="noreferrer">
                 <Music2 size={14} />
                 Apple
+              </a>
+            ) : null}
+            {record.discogsUrl ? (
+              <a href={record.discogsUrl} target="_blank" rel="noreferrer">
+                <Database size={14} />
+                Discogs
               </a>
             ) : null}
             {record.mbid ? (

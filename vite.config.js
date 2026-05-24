@@ -10,6 +10,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/upcitemdb/, "/prod/trial"),
       },
+      "/api/discogs": {
+        target: "https://api.discogs.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/discogs/, ""),
+      },
     },
   },
 });
