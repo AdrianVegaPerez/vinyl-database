@@ -909,7 +909,8 @@ async function readBackupFile(file) {
   return normalizeStoredRecords(records);
 }
 
-async function fetchReleaseDetails(mbid) {
+async function fetchReleaseDetails(mbid, options = {}) {
+  const { resolveStreaming = false } = options;
   const detailsUrl = `https://musicbrainz.org/ws/2/release/${mbid}?inc=artist-credits+labels+recordings+genres+tags+release-groups+url-rels&fmt=json`;
 
   const detailsResponse = await fetchWithTimeout(detailsUrl, {}, 8000);
@@ -975,17 +976,17 @@ async function fetchReleaseDetails(mbid) {
     }
   }
 
-  if (!detailPatch.appleMusicUrl) {
+  if (resolveStreaming && !detailPatch.appleMusicUrl) {
     detailPatch.appleMusicUrl = await resolveAppleMusicAlbumUrl({
       ...detailRecord,
       ...detailPatch,
     });
   }
-  if (!detailPatch.spotifyUrl && detailPatch.appleMusicUrl) {
+  if (resolveStreaming && !detailPatch.spotifyUrl && detailPatch.appleMusicUrl) {
     const linked = await resolveLinkedStreamingUrls(detailPatch.appleMusicUrl);
     if (linked.spotifyUrl) detailPatch.spotifyUrl = linked.spotifyUrl;
   }
-  if (!detailPatch.appleMusicUrl && detailPatch.spotifyUrl) {
+  if (resolveStreaming && !detailPatch.appleMusicUrl && detailPatch.spotifyUrl) {
     const linked = await resolveLinkedStreamingUrls(detailPatch.spotifyUrl);
     if (linked.appleMusicUrl) detailPatch.appleMusicUrl = linked.appleMusicUrl;
   }
@@ -1226,7 +1227,8 @@ function normalizeDiscogsSearchResult(result) {
   };
 }
 
-async function fetchDiscogsReleaseDetails(discogsId, searchResult = {}) {
+async function fetchDiscogsReleaseDetails(discogsId, searchResult = {}, options = {}) {
+  const { resolveStreaming = false } = options;
   if (!discogsId) return {};
 
   const response = await fetchWithTimeout(
@@ -1276,10 +1278,10 @@ async function fetchDiscogsReleaseDetails(discogsId, searchResult = {}) {
     catalogNumber: details.labels?.map((label) => label.catno).filter(Boolean).join(", ") || "",
   };
 
-  if (!patch.appleMusicUrl) {
+  if (resolveStreaming && !patch.appleMusicUrl) {
     patch.appleMusicUrl = await resolveAppleMusicAlbumUrl(patch);
   }
-  if (!patch.spotifyUrl && patch.appleMusicUrl) {
+  if (resolveStreaming && !patch.spotifyUrl && patch.appleMusicUrl) {
     const linked = await resolveLinkedStreamingUrls(patch.appleMusicUrl);
     if (linked.spotifyUrl) patch.spotifyUrl = linked.spotifyUrl;
   }
@@ -1312,37 +1314,41 @@ async function searchDiscogs(form) {
   if (title) searches.push({ q: title });
   if (artist) searches.push({ q: artist });
 
-  const uniqueSearches = uniqueBy(searches, (search) => JSON.stringify(search)).slice(0, 8);
+  const uniqueSearches = uniqueBy(searches, (search) => JSON.stringify(search)).slice(0, 6);
   const results = new Map();
 
-  for (const search of uniqueSearches) {
+  const searchResults = await Promise.allSettled(
+    uniqueSearches.map(async (search) => {
     const params = new URLSearchParams({
       type: "release",
       format: "Vinyl",
-      per_page: "10",
+      per_page: "8",
       ...search,
     });
-    try {
       const response = await fetchWithTimeout(
         discogsApiUrl("database/search", params),
         {},
-        7000,
+        4500,
       );
-      if (!response.ok) continue;
+      if (!response.ok) return [];
       const data = await response.json();
-      (data.results || []).forEach((result) => {
-        if (!results.has(result.id)) {
-          results.set(result.id, normalizeDiscogsSearchResult(result));
-        }
-      });
-    } catch {
-      // Discogs is helpful but optional; MusicBrainz can still provide suggestions.
-    }
-  }
+      return data.results || [];
+    }),
+  );
 
-  const candidates = Array.from(results.values()).slice(0, 10);
-  return Promise.all(
-    candidates.map(async (candidate) => {
+  searchResults.forEach((result) => {
+    if (result.status !== "fulfilled") return;
+    result.value.forEach((release) => {
+      if (!results.has(release.id)) {
+        results.set(release.id, normalizeDiscogsSearchResult(release));
+      }
+    });
+  });
+
+  const candidates = Array.from(results.values()).slice(0, 8);
+  const priorityCandidates = candidates.slice(0, 4);
+  const hydratedCandidates = await Promise.all(
+    priorityCandidates.map(async (candidate) => {
       try {
         const details = await fetchDiscogsReleaseDetails(candidate.discogsId, candidate);
         return {
@@ -1355,6 +1361,64 @@ async function searchDiscogs(form) {
         return candidate;
       }
     }),
+  );
+
+  const hydratedIds = new Set(hydratedCandidates.map((candidate) => candidate.id));
+  return [
+    ...hydratedCandidates,
+    ...candidates.filter((candidate) => !hydratedIds.has(candidate.id)),
+  ];
+}
+
+async function resolveStreamingForRecord(record) {
+  const patch = {};
+
+  if (!record.appleMusicUrl) {
+    patch.appleMusicUrl = await resolveAppleMusicAlbumUrl(record);
+  }
+  if (!record.spotifyUrl && (patch.appleMusicUrl || record.appleMusicUrl)) {
+    const linked = await resolveLinkedStreamingUrls(patch.appleMusicUrl || record.appleMusicUrl);
+    if (linked.spotifyUrl) patch.spotifyUrl = linked.spotifyUrl;
+  }
+  if (!patch.appleMusicUrl && !record.appleMusicUrl && (patch.spotifyUrl || record.spotifyUrl)) {
+    const linked = await resolveLinkedStreamingUrls(patch.spotifyUrl || record.spotifyUrl);
+    if (linked.appleMusicUrl) patch.appleMusicUrl = linked.appleMusicUrl;
+  }
+
+  return Object.fromEntries(Object.entries(patch).filter(([, value]) => value));
+}
+
+async function enrichSelectedLookupResult(result) {
+  const patches = [];
+
+  if (result.mbid) {
+    try {
+      patches.push(await fetchReleaseDetails(result.mbid, { resolveStreaming: true }));
+    } catch {
+      // Selection enrichment is a bonus; the chosen result should still apply immediately.
+    }
+  }
+
+  if (result.discogsId) {
+    try {
+      patches.push(await fetchDiscogsReleaseDetails(result.discogsId, result, { resolveStreaming: true }));
+    } catch {
+      // Discogs details may already be present from the suggestions list.
+    }
+  }
+
+  try {
+    patches.push(await resolveStreamingForRecord({ ...result, ...Object.assign({}, ...patches) }));
+  } catch {
+    // Streaming search can fail or time out without blocking saved metadata.
+  }
+
+  return Object.assign(
+    {},
+    ...patches.map((patch) => ({
+      ...patch,
+      artworkOptions: mergeArtworkOptions(result.artworkOptions || [], patch.artworkOptions || []),
+    })),
   );
 }
 
@@ -1497,8 +1561,10 @@ async function lookupReleases(form) {
   const barcode = cleanBarcode(form.scannedBarcode || "");
   if (!queries.length && !barcode && !form.searchArtist && !form.searchTitle && !form.artist && !form.title) return [];
 
-  let discogsMatches = await searchDiscogs(form);
-  const barcodeFallbacks = barcode ? await searchUpcItemDb(form.scannedBarcode || barcode) : [];
+  let [discogsMatches, barcodeFallbacks] = await Promise.all([
+    searchDiscogs(form),
+    barcode ? searchUpcItemDb(form.scannedBarcode || barcode) : Promise.resolve([]),
+  ]);
   if (!discogsMatches.length && barcodeFallbacks.length) {
     const fallbackDiscogsMatches = await Promise.all(
       barcodeFallbacks.map((fallback) =>
@@ -1516,6 +1582,16 @@ async function lookupReleases(form) {
     );
   }
   const fallbackTargets = [...discogsMatches, ...barcodeFallbacks];
+
+  if (barcode && discogsMatches.length) {
+    return uniqueBy([...discogsMatches, ...barcodeFallbacks], (result) =>
+      result.discogsId ? `discogs-${result.discogsId}` : result.id,
+    )
+      .filter((result) => result.title)
+      .sort((a, b) => matchPriority(b, form, fallbackTargets) - matchPriority(a, form, fallbackTargets))
+      .slice(0, 20);
+  }
+
   const fallbackQueries = fallbackTargets.flatMap((match) =>
     buildLookupQueries({
       searchArtist: match.artist,
@@ -1524,7 +1600,7 @@ async function lookupReleases(form) {
   );
   const allQueries = Array.from(
     new Set(fallbackTargets.length ? [...queries.slice(0, 4), ...fallbackQueries] : queries),
-  ).filter(Boolean);
+  ).filter(Boolean).slice(0, 6);
   const releaseMap = new Map();
   for (const query of allQueries) {
     let releases = [];
@@ -1545,7 +1621,7 @@ async function lookupReleases(form) {
     .sort((a, b) => {
       return matchPriority(b, form, fallbackTargets) - matchPriority(a, form, fallbackTargets);
     })
-    .slice(0, fallbackTargets.length ? 8 : 12);
+    .slice(0, fallbackTargets.length ? 6 : 8);
 
   const hydrated = await Promise.all(
     releaseCandidates.map(async (normalized) => {
@@ -2021,18 +2097,34 @@ export default function App() {
   }
 
   function applyLookup(recordId, result) {
-    updateRecord(recordId, {
+    const appliedResult = {
       ...result,
       id: recordId,
       referenceArtwork:
         result.referenceArtwork || result.artworkOptions?.find((option) => option.isFront)?.url || "",
-    });
+    };
+    updateRecord(recordId, appliedResult);
     setLookupState((current) => ({
       ...current,
       results: [],
       error: "",
       phase: "",
     }));
+
+    enrichSelectedLookupResult(appliedResult)
+      .then((patch) => {
+        if (!Object.keys(patch).length) return;
+        updateRecord(recordId, {
+          ...patch,
+          id: recordId,
+          referenceArtwork:
+            patch.referenceArtwork || appliedResult.referenceArtwork || patch.artworkOptions?.find((option) => option.isFront)?.url || "",
+          artworkOptions: mergeArtworkOptions(appliedResult.artworkOptions || [], patch.artworkOptions || []),
+        });
+      })
+      .catch(() => {
+        // The selected metadata is already applied; link enrichment can quietly fail.
+      });
   }
 
   function saveRecord(recordId) {
