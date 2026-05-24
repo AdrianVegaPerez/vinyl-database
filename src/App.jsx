@@ -237,51 +237,67 @@ function writeDatabaseValue(database, key, value) {
 
 async function loadStoredRecords() {
   const legacyRecords = readLegacyRecords();
+  let database = null;
+  let records = [];
 
   try {
-    const database = await openVinylDatabase();
+    database = await openVinylDatabase();
     const saved = await readDatabaseValue(database, STORAGE_KEY);
-    const records = Array.isArray(saved?.records)
+    records = Array.isArray(saved?.records)
       ? saved.records.map(normalizeStoredRecord)
       : [];
-
-    if (CLOUD_STORAGE_ENABLED) {
-      const cloudRecords = await loadCloudRecords();
-      if (cloudRecords?.length) {
-        await writeDatabaseValue(database, STORAGE_KEY, {
-          records: cloudRecords,
-          updatedAt: new Date().toISOString(),
-          source: "supabase",
-        });
-        clearLegacyRecords();
-        return cloudRecords;
-      }
-
-      const localRecords = records.length
-        ? records
-        : legacyRecords.map(normalizeStoredRecord);
-      if (localRecords.length) {
-        await saveCloudRecords(localRecords);
-        clearLegacyRecords();
-        return localRecords;
-      }
-    }
-
-    if (!records.length && legacyRecords.length) {
-      const migratedRecords = legacyRecords.map(normalizeStoredRecord);
-      await writeDatabaseValue(database, STORAGE_KEY, {
-        records: migratedRecords,
-        updatedAt: new Date().toISOString(),
-      });
-      clearLegacyRecords();
-      return migratedRecords;
-    }
-
-    clearLegacyRecords();
-    return records;
   } catch {
-    return legacyRecords.map(normalizeStoredRecord);
+    if (!CLOUD_STORAGE_ENABLED) {
+      return legacyRecords.map(normalizeStoredRecord);
+    }
   }
+
+  if (CLOUD_STORAGE_ENABLED) {
+    const cloudRecords = await loadCloudRecords();
+    if (cloudRecords?.length) {
+      if (database) {
+        try {
+          await writeDatabaseValue(database, STORAGE_KEY, {
+            records: cloudRecords,
+            updatedAt: new Date().toISOString(),
+            source: "supabase",
+          });
+        } catch {
+          // Cloud data is still loaded; local caching can catch up later.
+        }
+      }
+      clearLegacyRecords();
+      return cloudRecords;
+    }
+
+    const localRecords = records.length
+      ? records
+      : legacyRecords.map(normalizeStoredRecord);
+    if (localRecords.length) {
+      await saveCloudRecords(localRecords);
+      clearLegacyRecords();
+      return localRecords;
+    }
+  }
+
+  if (!records.length && legacyRecords.length) {
+    const migratedRecords = legacyRecords.map(normalizeStoredRecord);
+    if (database) {
+      try {
+        await writeDatabaseValue(database, STORAGE_KEY, {
+          records: migratedRecords,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch {
+        // The migrated records can still be used in memory.
+      }
+    }
+    clearLegacyRecords();
+    return migratedRecords;
+  }
+
+  clearLegacyRecords();
+  return records;
 }
 
 async function saveStoredRecords(records) {
@@ -2155,6 +2171,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("upload");
   const [records, setRecords] = useState([]);
   const [storageReady, setStorageReady] = useState(false);
+  const [canPersistRecords, setCanPersistRecords] = useState(false);
   const [selectedId, setSelectedId] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
@@ -2192,14 +2209,15 @@ export default function App() {
       .then((storedRecords) => {
         if (!isCurrent) return;
         setRecords((current) => (current.length ? current : storedRecords));
+        setCanPersistRecords(true);
+        setStorageReady(true);
         setStorageError("");
       })
       .catch(() => {
         if (!isCurrent) return;
+        setCanPersistRecords(false);
+        setStorageReady(false);
         setStorageError("The record database could not be opened in this browser.");
-      })
-      .finally(() => {
-        if (isCurrent) setStorageReady(true);
       });
 
     return () => {
@@ -2208,7 +2226,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!storageReady) return;
+    if (!storageReady || !canPersistRecords) return;
 
     saveStoredRecords(records)
       .then(() => setStorageError(""))
@@ -2217,7 +2235,7 @@ export default function App() {
           "The browser database could not save this change. The record is visible now, but it may not survive a refresh.",
         );
       });
-  }, [records, storageReady]);
+  }, [canPersistRecords, records, storageReady]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -2682,6 +2700,7 @@ export default function App() {
             artists={artists}
             years={years}
             labels={labels}
+            storageReady={storageReady}
             moveToReview={moveToReview}
             updateRecord={updateRecord}
             removeRecord={removeRecord}
@@ -3870,6 +3889,7 @@ function CollectionView({
   artists,
   years,
   labels,
+  storageReady,
   moveToReview,
   updateRecord,
   removeRecord,
@@ -3886,6 +3906,14 @@ function CollectionView({
     viewMode === "database"
       ? `${filteredCollection.length} row${filteredCollection.length === 1 ? "" : "s"}`
       : `${filteredCollection.length} showing · ${columnCount} columns · ${rowCount} rows`;
+
+  if (!storageReady) {
+    return (
+      <section className="center-stage">
+        <EmptyState icon={Loader2} title="Syncing library" />
+      </section>
+    );
+  }
 
   if (!collection.length) {
     return (
@@ -4372,7 +4400,15 @@ function CollectionView({
             ))}
           </div>
         ) : (
-          <EmptyState icon={Search} title="No records match" />
+          <section className="center-stage">
+            <EmptyState icon={Search} title="No records match" />
+            {activeFilterCount ? (
+              <button className="primary-action" type="button" onClick={clearFilters}>
+                <SlidersHorizontal size={18} />
+                Clear filters
+              </button>
+            ) : null}
+          </section>
         )}
       </section>
       {detailRecord ? (
