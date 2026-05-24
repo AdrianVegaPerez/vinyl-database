@@ -2408,7 +2408,14 @@ function ReviewView({
         />
         <ArtworkPicker
           record={record}
-          onSelect={(url) => updateRecord(record.id, { referenceArtwork: url })}
+          onSelect={(url, option) =>
+            updateRecord(record.id, {
+              referenceArtwork: url,
+              artworkOptions: option
+                ? mergeArtworkOptions([option], record.artworkOptions || [])
+                : record.artworkOptions || [],
+            })
+          }
         />
         <ClueForm
           record={record}
@@ -2617,33 +2624,118 @@ function ArtworkCompare({ record, onRotate }) {
 }
 
 function ArtworkPicker({ record, onSelect }) {
+  const [customArtworkUrl, setCustomArtworkUrl] = useState("");
+  const [customArtworkError, setCustomArtworkError] = useState("");
   const options = record.artworkOptions || [];
-  if (!options.length) return null;
+
+  useEffect(() => {
+    setCustomArtworkUrl("");
+    setCustomArtworkError("");
+  }, [record.id]);
+
+  const displayedOptions = mergeArtworkOptions(
+    options,
+    record.referenceArtwork
+      ? [{
+          id: `current-${record.referenceArtwork}`,
+          url: record.referenceArtwork,
+          fullUrl: record.referenceArtwork,
+          label: "Current artwork",
+          isFront: true,
+        }]
+      : [],
+  );
+
+  function addCustomArtworkUrl() {
+    const url = customArtworkUrl.trim();
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/.test(parsed.protocol)) {
+        throw new Error("Use an http or https image address.");
+      }
+      const option = {
+        id: `custom-${url}`,
+        url,
+        fullUrl: url,
+        label: "Pasted image",
+        isFront: true,
+      };
+      onSelect(url, option);
+      setCustomArtworkUrl("");
+      setCustomArtworkError("");
+    } catch {
+      setCustomArtworkError("Paste a valid image URL that starts with http or https.");
+    }
+  }
 
   return (
     <section className="artwork-picker">
       <div className="panel-title compact">
-        <span>Official artwork</span>
+        <span>Album artwork</span>
         <ImageIcon size={18} />
       </div>
-      <div className="artwork-options">
-        {options.map((option) => (
-          <button
-            key={option.id}
-            className={
-              record.referenceArtwork === option.url
-                ? "artwork-option selected"
-                : "artwork-option"
-            }
-            type="button"
-            onClick={() => onSelect(option.url)}
-            title={`Use ${option.label}`}
-          >
-            <img src={option.url} alt="" />
-            <span>{option.label}</span>
-          </button>
-        ))}
+      <div className="artwork-url-form">
+        <label>
+          <span>Paste image URL</span>
+          <input
+            value={customArtworkUrl}
+            onChange={(event) => {
+              setCustomArtworkUrl(event.target.value);
+              setCustomArtworkError("");
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                addCustomArtworkUrl();
+              }
+            }}
+            placeholder="https://example.com/album-cover.jpg"
+          />
+        </label>
+        <button
+          className="secondary-action"
+          type="button"
+          onClick={addCustomArtworkUrl}
+          disabled={!customArtworkUrl.trim()}
+        >
+          <ImagePlus size={18} />
+          Use URL
+        </button>
       </div>
+      {customArtworkError ? (
+        <div className="scan-status">{customArtworkError}</div>
+      ) : null}
+      {displayedOptions.length ? (
+        <div className="artwork-options">
+          {displayedOptions.map((option) => (
+            <button
+              key={option.id}
+              className={
+                record.referenceArtwork === option.url
+                  ? "artwork-option selected"
+                  : "artwork-option"
+              }
+              type="button"
+              onClick={() => onSelect(option.url, option)}
+              title={`Use ${option.label}`}
+            >
+              <img src={option.url} alt="" />
+              <span>{option.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <button
+          className="artwork-option empty-url-option"
+          type="button"
+          disabled
+        >
+          <div className="empty-artwork">
+            <ImageIcon size={28} />
+          </div>
+          <span>No artwork selected yet</span>
+        </button>
+      )}
     </section>
   );
 }

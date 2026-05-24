@@ -983,6 +983,41 @@ main {
   margin-bottom: 18px;
 }
 
+.artwork-url-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid rgba(29, 26, 23, 0.1);
+  border-radius: 8px;
+  background: #fffdf8;
+}
+
+.artwork-url-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #675c53;
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.artwork-url-form input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid rgba(29, 26, 23, 0.14);
+  border-radius: 8px;
+  color: #1d1a17;
+  background: #fffaf3;
+  outline: none;
+}
+
+.artwork-url-form button {
+  min-width: 118px;
+}
+
 .artwork-options {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
@@ -1020,6 +1055,11 @@ main {
   font-weight: 900;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.empty-url-option {
+  width: min(180px, 100%);
+  cursor: default;
 }
 
 .action-bar {
@@ -2076,6 +2116,14 @@ main {
     grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
   }
 
+  .artwork-url-form {
+    grid-template-columns: 1fr;
+  }
+
+  .artwork-url-form button {
+    width: 100%;
+  }
+
   .artwork-option img {
     aspect-ratio: 1;
   }
@@ -2323,6 +2371,7 @@ main {
 :root[data-theme="dark"] .filter-field > span,
 :root[data-theme="dark"] .record-form label,
 :root[data-theme="dark"] .clue-form label,
+:root[data-theme="dark"] .artwork-url-form label,
 :root[data-theme="dark"] .streaming-fields label,
 :root[data-theme="dark"] .wishlist-fields label,
 :root[data-theme="dark"] .album-meta p,
@@ -2398,6 +2447,7 @@ main {
 :root[data-theme="dark"] .checkbox-field,
 :root[data-theme="dark"] .genre-selector,
 :root[data-theme="dark"] .artist-selector,
+:root[data-theme="dark"] .artwork-url-form,
 :root[data-theme="dark"] .app-alert,
 :root[data-theme="dark"] .upload-notice,
 :root[data-theme="dark"] .clue-panel,
@@ -2422,6 +2472,7 @@ main {
 :root[data-theme="dark"] .record-form input,
 :root[data-theme="dark"] .record-form textarea,
 :root[data-theme="dark"] .clue-form input,
+:root[data-theme="dark"] .artwork-url-form input,
 :root[data-theme="dark"] .streaming-fields input,
 :root[data-theme="dark"] .wishlist-fields input {
   border-color: rgba(245, 238, 229, 0.16);
